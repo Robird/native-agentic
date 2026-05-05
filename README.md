@@ -6,9 +6,10 @@
 
 - `scripts/run_experiment.py`：Python 版实验器，负责构造请求、调用 API、解析响应和聚合结果。
 - `scripts/run_experiment.sh`：兼容入口，转发到 Python 版实验器。
-- `scripts/generate_state_trajectories.py`：DeepSeek 绑定的第一版状态轨迹语料生成器。
+- `scripts/generate_state_trajectories.py`：DeepSeek 绑定的状态轨迹语料生成器，现已支持单阶段和“两阶段教师压缩”管线。
 - `data/scenarios/*.json`：两个手写第三人称数据点。
 - `schemas/state_trajectory_v1.json`：状态轨迹语料的第一版机器可读 schema。
+- `schemas/teacher_analysis_v1.json`：分析教师中间稿的第一版 schema。
 - `docs/vision.md`：当前愿景与关键发现。
 - `docs/roadmap.md`：阶段性路线图。
 - `results/`：每次运行的请求、原始响应和聚合结果会落到这里。
@@ -47,10 +48,24 @@ cd /repos/mental-model
 SAMPLES=1 python3 scripts/generate_state_trajectories.py guard_unwinnable_001
 ```
 
+当前默认会走两阶段教师管线：
+
+1. 先生成 `teacher_analysis_v1` 中间稿。
+2. 再把中间稿压缩成 `state_trajectory_v1` 最终样本。
+
+如需回退到旧的单阶段直出模式：
+
+```bash
+cd /repos/mental-model
+TRAJECTORY_PIPELINE=single_stage SAMPLES=1 python3 scripts/generate_state_trajectories.py guard_unwinnable_001
+```
+
 状态轨迹生成器也使用以下环境变量：
 
-- `TRAJECTORY_PROFILE`：默认 `analysis_teacher_v1`。
+- `TRAJECTORY_PROFILE`：默认 `analysis_teacher_compress_v1`。
+- `TRAJECTORY_PIPELINE`：默认 `teacher_compress`，可选 `single_stage`。
 - `SCHEMA_FILE`：默认 `schemas/state_trajectory_v1.json`。
+- `TEACHER_SCHEMA_FILE`：默认 `schemas/teacher_analysis_v1.json`。
 
 输出说明：
 
@@ -61,6 +76,9 @@ SAMPLES=1 python3 scripts/generate_state_trajectories.py guard_unwinnable_001
 
 状态轨迹生成器输出：
 
+- `results/<run_id>/teacher_requests/*.json`：教师分析阶段请求体。
+- `results/<run_id>/teacher_raw/*.json`：教师分析阶段原始响应。
+- `results/<run_id>/teacher_analyses.jsonl`：教师分析中间稿。
 - `results/<run_id>/trajectory_requests/*.json`：每次状态轨迹请求体。
 - `results/<run_id>/trajectory_raw/*.json`：每次状态轨迹 API 原始响应。
 - `results/<run_id>/trajectories.jsonl`：解析后的状态轨迹记录。
@@ -85,3 +103,9 @@ SAMPLES=1 python3 scripts/generate_state_trajectories.py guard_unwinnable_001
 - `chosen_action`：以 action packet 形式表达的最终一步。
 - `state_updates`：对 MemoryNotebook、GoalTree、SelfState、WorldModel 的稀疏更新。
 - `quality_control`：assistant 污染与过度解释风险等质控信号。
+
+两阶段教师管线 v1 的设计目的：
+
+- 第一阶段保留较充分的角色分析与动作权衡。
+- 第二阶段把教师稿压成更短、更稀疏、更接近未来训练样本的轨迹。
+- `trajectory_summary.txt` 会额外输出稀疏度指标，例如 `avg_visible_world_items`、`avg_candidate_actions` 和 `avg_state_update_entries`。

@@ -17,8 +17,10 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL_ID = "deepseek-v4-flash"
 DEFAULT_SAMPLES = 3
 DEFAULT_TEMPERATURE = 0.7
-DEFAULT_PROFILE = "analysis_teacher_v1"
+DEFAULT_PROFILE = "analysis_teacher_compress_v1"
 DEFAULT_SCHEMA_PATH = "schemas/state_trajectory_v1.json"
+DEFAULT_TEACHER_SCHEMA_PATH = "schemas/teacher_analysis_v1.json"
+DEFAULT_PIPELINE_MODE = "teacher_compress"
 
 
 @dataclass(frozen=True)
@@ -26,16 +28,21 @@ class Config:
     root_dir: Path
     scenario_dir: Path
     schema_path: Path
+    teacher_schema_path: Path
     results_dir: Path
     base_url: str
     model_id: str
     samples: int
     temperature: float
     profile: str
+    pipeline_mode: str
     run_id: str
     run_dir: Path
     request_dir: Path
     raw_dir: Path
+    teacher_request_dir: Path
+    teacher_raw_dir: Path
+    teacher_analysis_file: Path
     trajectories_file: Path
     summary_file: Path
     manifest_file: Path
@@ -54,6 +61,10 @@ def load_config() -> Config:
     root_dir = Path(__file__).resolve().parent.parent
     scenario_dir = root_dir / "data" / "scenarios"
     schema_path = root_dir / os.environ.get("SCHEMA_FILE", DEFAULT_SCHEMA_PATH)
+    teacher_schema_path = root_dir / os.environ.get(
+        "TEACHER_SCHEMA_FILE",
+        DEFAULT_TEACHER_SCHEMA_PATH,
+    )
     results_dir = Path(os.environ.get("RESULTS_DIR", str(root_dir / "results")))
     run_id = os.environ.get(
         "RUN_ID",
@@ -64,16 +75,21 @@ def load_config() -> Config:
         root_dir=root_dir,
         scenario_dir=scenario_dir,
         schema_path=schema_path,
+        teacher_schema_path=teacher_schema_path,
         results_dir=results_dir,
         base_url=os.environ.get("BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
         model_id=os.environ.get("MODEL_ID", DEFAULT_MODEL_ID),
         samples=int(os.environ.get("SAMPLES", str(DEFAULT_SAMPLES))),
         temperature=float(os.environ.get("TEMPERATURE", str(DEFAULT_TEMPERATURE))),
         profile=os.environ.get("TRAJECTORY_PROFILE", DEFAULT_PROFILE),
+        pipeline_mode=os.environ.get("TRAJECTORY_PIPELINE", DEFAULT_PIPELINE_MODE),
         run_id=run_id,
         run_dir=run_dir,
         request_dir=run_dir / "trajectory_requests",
         raw_dir=run_dir / "trajectory_raw",
+        teacher_request_dir=run_dir / "teacher_requests",
+        teacher_raw_dir=run_dir / "teacher_raw",
+        teacher_analysis_file=run_dir / "teacher_analyses.jsonl",
         trajectories_file=run_dir / "trajectories.jsonl",
         summary_file=run_dir / "trajectory_summary.txt",
         manifest_file=run_dir / "manifest.json",
@@ -88,6 +104,10 @@ def validate_config(config: Config) -> None:
         raise SystemExit("SAMPLES must be a positive integer.")
     if not config.schema_path.is_file():
         raise SystemExit(f"Schema file not found: {config.schema_path}")
+    if config.pipeline_mode not in {"single_stage", "teacher_compress"}:
+        raise SystemExit("TRAJECTORY_PIPELINE must be one of: single_stage, teacher_compress")
+    if config.pipeline_mode == "teacher_compress" and not config.teacher_schema_path.is_file():
+        raise SystemExit(f"Teacher schema file not found: {config.teacher_schema_path}")
 
 
 def discover_scenarios(config: Config, selected_ids: list[str]) -> list[dict[str, Any]]:
@@ -110,6 +130,10 @@ def load_schema_template(config: Config) -> dict[str, Any]:
     return json.loads(config.schema_path.read_text(encoding="utf-8"))
 
 
+def load_teacher_schema_template(config: Config) -> dict[str, Any]:
+    return json.loads(config.teacher_schema_path.read_text(encoding="utf-8"))
+
+
 def action_option_lines(scenario: dict[str, Any]) -> tuple[list[str], str]:
     options = list(scenario.get("action_options", []))
     if not options:
@@ -124,7 +148,11 @@ def action_option_lines(scenario: dict[str, Any]) -> tuple[list[str], str]:
     return [item["key"] for item in options] + ["other"], "\n".join(option_lines)
 
 
-def build_prompt(config: Config, schema_template: dict[str, Any], scenario: dict[str, Any]) -> tuple[str, str, list[str]]:
+def build_single_stage_prompt(
+    config: Config,
+    schema_template: dict[str, Any],
+    scenario: dict[str, Any],
+) -> tuple[str, str, list[str]]:
     action_labels, option_lines = action_option_lines(scenario)
     tool_name = schema_template["tool_name"]
     system_prompt = (
@@ -167,11 +195,23 @@ def build_prompt(config: Config, schema_template: dict[str, Any], scenario: dict
     return system_prompt, user_prompt, action_labels
 
 
+def patch_action_label_enums(parameters: dict[str, Any], action_labels: list[str]) -> None:
+    if not action_labels:
+        return
+
+    if "candidate_actions" in parameters.get("properties", {}):
+        parameters["properties"]["candidate_actions"]["items"]["properties"]["action_label"]["enum"] = action_labels
+    if "chosen_action" in parameters.get("properties", {}):
+        parameters["properties"]["chosen_action"]["properties"]["action_label"]["enum"] = action_labels
+    if "action_assessment" in parameters.get("properties", {}):
+        parameters["properties"]["action_assessment"]["items"]["properties"]["action_label"]["enum"] = action_labels
+    if "recommended_packet" in parameters.get("properties", {}):
+        parameters["properties"]["recommended_packet"]["properties"]["action_label"]["enum"] = action_labels
+
+
 def build_tool(schema_template: dict[str, Any], action_labels: list[str]) -> dict[str, Any]:
     parameters = copy.deepcopy(schema_template["parameters"])
-    if action_labels:
-        parameters["properties"]["candidate_actions"]["items"]["properties"]["action_label"]["enum"] = action_labels
-        parameters["properties"]["chosen_action"]["properties"]["action_label"]["enum"] = action_labels
+    patch_action_label_enums(parameters, action_labels)
 
     return {
         "type": "function",
@@ -188,7 +228,132 @@ def build_request_payload(
     schema_template: dict[str, Any],
     scenario: dict[str, Any],
 ) -> dict[str, Any]:
-    system_prompt, user_prompt, action_labels = build_prompt(config, schema_template, scenario)
+    system_prompt, user_prompt, action_labels = build_single_stage_prompt(
+        config,
+        schema_template,
+        scenario,
+    )
+    return {
+        "model": config.model_id,
+        "temperature": config.temperature,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "tools": [build_tool(schema_template, action_labels)],
+    }
+
+
+def build_teacher_prompt(
+    config: Config,
+    teacher_schema_template: dict[str, Any],
+    scenario: dict[str, Any],
+) -> tuple[str, str, list[str]]:
+    action_labels, option_lines = action_option_lines(scenario)
+    tool_name = teacher_schema_template["tool_name"]
+    system_prompt = (
+        "你是分析教师，不是聊天助手。你的任务是先产出一份较充分但仍聚焦的角色分析中间稿，"
+        "供第二阶段压缩器进一步压成更短、更稀疏的训练样本。\n\n"
+        "要求：\n"
+        "1. 以角色一致性、世界模型一致性和动作可执行性为第一优先级。\n"
+        "2. 保留足够的信息来支持压缩，但不要写故事散文，也不要写道德说教。\n"
+        "3. action_assessment 要体现真实权衡与失败方式。\n"
+        "4. compression_guidance.keep 里放压缩阶段必须保留的少数关键信息；trim 里放可删减的冗余。\n"
+        "5. 默认世界里没有 user/system 身份优先级，只有角色、世界、关系、责任与目标。\n"
+        f"6. 你必须且只能调用一次 {tool_name} 函数，不要输出函数外文本。"
+    )
+    user_prompt = (
+        f"生成配置：\n- profile: {config.profile}\n- pipeline: {config.pipeline_mode}\n"
+        f"- teacher_schema_version: {teacher_schema_template['schema_version']}\n\n"
+        "请为下面这个第三人称场景写一份‘分析教师中间稿’。\n\n"
+        f"场景 ID：{scenario['id']}\n"
+        f"角色名：{scenario['name']}\n\n"
+        f"人物经历与稳定特征：\n{scenario['profile']}\n\n"
+        f"当前情景：\n{scenario['situation']}\n\n"
+        f"当前任务表述：\n{scenario['task']}\n\n"
+        "可用动作标签：\n"
+        f"{option_lines}\n\n"
+        "输出提醒：\n"
+        "- 这是给压缩器看的教师草稿，不是最终训练样本。\n"
+        "- recommended_packet 应给出你最看好的动作包。\n"
+        "- compression_guidance.target_style 应指向‘短、稀疏、可续写、低 assistant 污染’。\n"
+    )
+    return system_prompt, user_prompt, action_labels
+
+
+def build_teacher_request_payload(
+    config: Config,
+    teacher_schema_template: dict[str, Any],
+    scenario: dict[str, Any],
+) -> dict[str, Any]:
+    system_prompt, user_prompt, action_labels = build_teacher_prompt(
+        config,
+        teacher_schema_template,
+        scenario,
+    )
+    return {
+        "model": config.model_id,
+        "temperature": config.temperature,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "tools": [build_tool(teacher_schema_template, action_labels)],
+    }
+
+
+def build_compressor_prompt(
+    config: Config,
+    schema_template: dict[str, Any],
+    scenario: dict[str, Any],
+    teacher_analysis: dict[str, Any],
+) -> tuple[str, str, list[str]]:
+    action_labels, option_lines = action_option_lines(scenario)
+    tool_name = schema_template["tool_name"]
+    teacher_analysis_text = json.dumps(teacher_analysis, ensure_ascii=False, indent=2)
+    system_prompt = (
+        "你是状态轨迹压缩器。你的输入是一份分析教师中间稿，你的任务是把它压成更短、更稀疏、更适合未来训练的单步状态轨迹。\n\n"
+        "压缩原则：\n"
+        "1. 只保留真正会影响下一步行为分布的状态。\n"
+        "2. 不要把教师分析原样搬运成长段文字；优先使用短句、低冗余条目。\n"
+        "3. visible_world、recalled_memory、self_state、inferred_latents 尽量控制在 2-4 条。\n"
+        "4. candidate_actions 尽量控制在 2-3 个，并保留真实权衡。\n"
+        "5. state_updates 只写有必要的增量，不做思维链转储。\n"
+        "6. 保持 assistant 污染低，不要出现‘为了帮助用户’‘作为助手’之类的外部协议语言。\n"
+        f"7. 你必须且只能调用一次 {tool_name} 函数，不要输出函数外文本。"
+    )
+    user_prompt = (
+        f"生成配置：\n- profile: {config.profile}\n- pipeline: {config.pipeline_mode}\n"
+        f"- final_schema_version: {schema_template['schema_version']}\n\n"
+        "请把下面的教师中间稿压成最终状态轨迹样本。\n\n"
+        f"场景 ID：{scenario['id']}\n"
+        f"角色名：{scenario['name']}\n\n"
+        "可用动作标签：\n"
+        f"{option_lines}\n\n"
+        "教师中间稿：\n"
+        f"{teacher_analysis_text}\n\n"
+        "输出提醒：\n"
+        "- chosen_action.action_label 应与教师推荐一致，除非教师分析内部自相矛盾。\n"
+        "- relationship_frame 至少保留 1-2 个真正影响此步的关键关系。\n"
+        "- quality_control.notes 用一句短说明解释压缩后的关键取舍。\n"
+    )
+    return system_prompt, user_prompt, action_labels
+
+
+def build_compressor_request_payload(
+    config: Config,
+    schema_template: dict[str, Any],
+    scenario: dict[str, Any],
+    teacher_analysis: dict[str, Any],
+) -> dict[str, Any]:
+    system_prompt, user_prompt, action_labels = build_compressor_prompt(
+        config,
+        schema_template,
+        scenario,
+        teacher_analysis,
+    )
     return {
         "model": config.model_id,
         "temperature": config.temperature,
@@ -226,6 +391,7 @@ def parse_trajectory_record(
     schema_template: dict[str, Any],
     scenario_id: str,
     profile: str,
+    pipeline_mode: str,
     sample_index: int,
     data: dict[str, Any],
 ) -> dict[str, Any]:
@@ -235,11 +401,14 @@ def parse_trajectory_record(
     record: dict[str, Any] = {
         "scenario_id": scenario_id,
         "profile": profile,
+        "pipeline_mode": pipeline_mode,
         "sample_index": sample_index,
         "schema_version": schema_template["schema_version"],
         "model": data.get("model", ""),
         "finish_reason": data.get("choices", [{}])[0].get("finish_reason", ""),
         "parse_status": "ok",
+        "teacher_parse_status": "",
+        "teacher_recommended_action_label": "",
         "chosen_action_label": "",
         "assistant_contamination_risk": "",
         "over_explaining_risk": "",
@@ -279,6 +448,62 @@ def parse_trajectory_record(
     return record
 
 
+def parse_teacher_analysis_record(
+    teacher_schema_template: dict[str, Any],
+    scenario_id: str,
+    profile: str,
+    sample_index: int,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    message = data.get("choices", [{}])[0].get("message", {})
+    tool_calls = message.get("tool_calls") or []
+
+    record: dict[str, Any] = {
+        "scenario_id": scenario_id,
+        "profile": profile,
+        "sample_index": sample_index,
+        "schema_version": teacher_schema_template["schema_version"],
+        "model": data.get("model", ""),
+        "finish_reason": data.get("choices", [{}])[0].get("finish_reason", ""),
+        "parse_status": "ok",
+        "recommended_action_label": "",
+        "assistant_contamination_risk": "",
+        "over_explaining_risk": "",
+        "world_model_consistency": None,
+        "teacher_analysis": None,
+        "raw_content": message.get("content", ""),
+    }
+
+    if not tool_calls:
+        record["parse_status"] = "no_tool_call"
+        return record
+
+    arguments_text = tool_calls[0].get("function", {}).get("arguments", "{}")
+    try:
+        teacher_analysis = json.loads(arguments_text)
+    except json.JSONDecodeError:
+        record["parse_status"] = "bad_tool_json"
+        record["raw_arguments"] = arguments_text
+        return record
+
+    quality_control = teacher_analysis.get("quality_control", {})
+    recommended_packet = teacher_analysis.get("recommended_packet", {})
+    record.update(
+        {
+            "recommended_action_label": recommended_packet.get("action_label", ""),
+            "assistant_contamination_risk": quality_control.get("assistant_contamination_risk", ""),
+            "over_explaining_risk": quality_control.get("over_explaining_risk", ""),
+            "world_model_consistency": quality_control.get("world_model_consistency"),
+            "teacher_analysis": teacher_analysis,
+        }
+    )
+
+    usage = data.get("usage") or {}
+    if usage:
+        record["usage"] = usage
+    return record
+
+
 def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -286,10 +511,19 @@ def write_json(path: Path, data: Any) -> None:
 def ensure_output_dirs(config: Config) -> None:
     config.request_dir.mkdir(parents=True, exist_ok=True)
     config.raw_dir.mkdir(parents=True, exist_ok=True)
+    if config.pipeline_mode == "teacher_compress":
+        config.teacher_request_dir.mkdir(parents=True, exist_ok=True)
+        config.teacher_raw_dir.mkdir(parents=True, exist_ok=True)
+        config.teacher_analysis_file.write_text("", encoding="utf-8")
     config.trajectories_file.write_text("", encoding="utf-8")
 
 
-def write_manifest(config: Config, schema_template: dict[str, Any], scenarios: list[dict[str, Any]]) -> None:
+def write_manifest(
+    config: Config,
+    schema_template: dict[str, Any],
+    teacher_schema_template: dict[str, Any] | None,
+    scenarios: list[dict[str, Any]],
+) -> None:
     manifest = {
         "run_id": config.run_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -298,6 +532,7 @@ def write_manifest(config: Config, schema_template: dict[str, Any], scenarios: l
         "temperature": config.temperature,
         "samples": config.samples,
         "profile": config.profile,
+        "pipeline_mode": config.pipeline_mode,
         "schema_version": schema_template["schema_version"],
         "schema_path": str(config.schema_path.relative_to(config.root_dir)),
         "scenarios": [scenario["id"] for scenario in scenarios],
@@ -308,6 +543,18 @@ def write_manifest(config: Config, schema_template: dict[str, Any], scenarios: l
             "summary": str(config.summary_file.relative_to(config.root_dir))
         }
     }
+    if teacher_schema_template is not None:
+        manifest["teacher_schema_version"] = teacher_schema_template["schema_version"]
+        manifest["teacher_schema_path"] = str(config.teacher_schema_path.relative_to(config.root_dir))
+        manifest["output_files"]["teacher_requests"] = str(
+            config.teacher_request_dir.relative_to(config.root_dir)
+        )
+        manifest["output_files"]["teacher_raw"] = str(
+            config.teacher_raw_dir.relative_to(config.root_dir)
+        )
+        manifest["output_files"]["teacher_analyses"] = str(
+            config.teacher_analysis_file.relative_to(config.root_dir)
+        )
     write_json(config.manifest_file, manifest)
 
 
@@ -333,6 +580,9 @@ def write_summary(trajectories_file: Path, summary_file: Path) -> str:
         parse_counts: collections.Counter[str] = collections.Counter()
         contamination_counts: collections.Counter[str] = collections.Counter()
         consistency_values: list[int] = []
+        visible_world_sizes: list[int] = []
+        candidate_action_sizes: list[int] = []
+        state_update_sizes: list[int] = []
 
         for row in subset:
             parse_counts[row.get("parse_status", "unknown")] += 1
@@ -341,6 +591,14 @@ def write_summary(trajectories_file: Path, summary_file: Path) -> str:
             consistency = row.get("world_model_consistency")
             if isinstance(consistency, int):
                 consistency_values.append(consistency)
+            trajectory = row.get("trajectory") or {}
+            if trajectory:
+                visible_world_sizes.append(len(trajectory.get("visible_world") or []))
+                candidate_action_sizes.append(len(trajectory.get("candidate_actions") or []))
+                state_updates = trajectory.get("state_updates") or {}
+                state_update_sizes.append(
+                    sum(len(state_updates.get(key) or []) for key in ["memory_notebook", "goal_tree", "self_state", "world_model"])
+                )
 
         lines.append("")
         lines.append(f"[{scenario_id}] profile={profile} samples={len(subset)}")
@@ -349,6 +607,18 @@ def write_summary(trajectories_file: Path, summary_file: Path) -> str:
         if consistency_values:
             average = sum(consistency_values) / len(consistency_values)
             lines.append(f"avg_world_model_consistency={average:.1f}")
+        if visible_world_sizes:
+            lines.append(
+                f"avg_visible_world_items={sum(visible_world_sizes) / len(visible_world_sizes):.1f}"
+            )
+        if candidate_action_sizes:
+            lines.append(
+                f"avg_candidate_actions={sum(candidate_action_sizes) / len(candidate_action_sizes):.1f}"
+            )
+        if state_update_sizes:
+            lines.append(
+                f"avg_state_update_entries={sum(state_update_sizes) / len(state_update_sizes):.1f}"
+            )
 
         total = sum(label_counts.values()) or 1
         for label, count in label_counts.most_common():
@@ -363,42 +633,137 @@ def write_summary(trajectories_file: Path, summary_file: Path) -> str:
 def run_generation(
     config: Config,
     schema_template: dict[str, Any],
+    teacher_schema_template: dict[str, Any] | None,
     scenarios: list[dict[str, Any]],
 ) -> None:
     ensure_output_dirs(config)
-    write_manifest(config, schema_template, scenarios)
+    write_manifest(config, schema_template, teacher_schema_template, scenarios)
 
     print(f"run_id={config.run_id}")
     print(f"run_dir={config.run_dir}")
     print(
         f"model={config.model_id} samples={config.samples} temperature={config.temperature} profile={config.profile}"
     )
+    print(f"pipeline={config.pipeline_mode}")
     print(f"schema={config.schema_path}")
+    if teacher_schema_template is not None:
+        print(f"teacher_schema={config.teacher_schema_path}")
 
-    with config.trajectories_file.open("a", encoding="utf-8") as handle:
-        for scenario in scenarios:
-            scenario_id = scenario["id"]
-            for index in range(1, config.samples + 1):
-                tag = sample_tag(index)
-                request_path = config.request_dir / f"{scenario_id}__{tag}.json"
-                raw_path = config.raw_dir / f"{scenario_id}__{tag}.json"
+    teacher_handle = None
+    if config.pipeline_mode == "teacher_compress":
+        teacher_handle = config.teacher_analysis_file.open("a", encoding="utf-8")
 
-                payload = build_request_payload(config, schema_template, scenario)
-                write_json(request_path, payload)
+    with config.trajectories_file.open("a", encoding="utf-8") as trajectory_handle:
+        try:
+            for scenario in scenarios:
+                scenario_id = scenario["id"]
+                for index in range(1, config.samples + 1):
+                    tag = sample_tag(index)
 
-                print(f"requesting scenario={scenario_id} sample={tag}")
-                response = post_chat_completion(config, payload)
-                write_json(raw_path, response)
+                    if config.pipeline_mode == "single_stage":
+                        request_path = config.request_dir / f"{scenario_id}__{tag}.json"
+                        raw_path = config.raw_dir / f"{scenario_id}__{tag}.json"
 
-                record = parse_trajectory_record(
-                    schema_template,
-                    scenario_id,
-                    config.profile,
-                    index,
-                    response,
-                )
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                handle.flush()
+                        payload = build_request_payload(config, schema_template, scenario)
+                        write_json(request_path, payload)
+
+                        print(f"requesting scenario={scenario_id} sample={tag}")
+                        response = post_chat_completion(config, payload)
+                        write_json(raw_path, response)
+
+                        record = parse_trajectory_record(
+                            schema_template,
+                            scenario_id,
+                            config.profile,
+                            config.pipeline_mode,
+                            index,
+                            response,
+                        )
+                        trajectory_handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        trajectory_handle.flush()
+                        continue
+
+                    teacher_request_path = config.teacher_request_dir / f"{scenario_id}__{tag}.json"
+                    teacher_raw_path = config.teacher_raw_dir / f"{scenario_id}__{tag}.json"
+                    teacher_payload = build_teacher_request_payload(
+                        config,
+                        teacher_schema_template,
+                        scenario,
+                    )
+                    write_json(teacher_request_path, teacher_payload)
+
+                    print(f"teacher_request scenario={scenario_id} sample={tag}")
+                    teacher_response = post_chat_completion(config, teacher_payload)
+                    write_json(teacher_raw_path, teacher_response)
+                    teacher_record = parse_teacher_analysis_record(
+                        teacher_schema_template,
+                        scenario_id,
+                        config.profile,
+                        index,
+                        teacher_response,
+                    )
+                    teacher_handle.write(json.dumps(teacher_record, ensure_ascii=False) + "\n")
+                    teacher_handle.flush()
+
+                    if teacher_record["parse_status"] != "ok" or not teacher_record.get("teacher_analysis"):
+                        failed_record = {
+                            "scenario_id": scenario_id,
+                            "profile": config.profile,
+                            "pipeline_mode": config.pipeline_mode,
+                            "sample_index": index,
+                            "schema_version": schema_template["schema_version"],
+                            "model": teacher_response.get("model", ""),
+                            "finish_reason": teacher_response.get("choices", [{}])[0].get("finish_reason", ""),
+                            "parse_status": f"teacher_{teacher_record['parse_status']}",
+                            "teacher_parse_status": teacher_record["parse_status"],
+                            "teacher_recommended_action_label": teacher_record.get("recommended_action_label", ""),
+                            "chosen_action_label": "",
+                            "assistant_contamination_risk": teacher_record.get("assistant_contamination_risk", ""),
+                            "over_explaining_risk": teacher_record.get("over_explaining_risk", ""),
+                            "world_model_consistency": teacher_record.get("world_model_consistency"),
+                            "trajectory": None,
+                            "raw_content": teacher_record.get("raw_content", ""),
+                        }
+                        if teacher_record.get("usage"):
+                            failed_record["teacher_usage"] = teacher_record["usage"]
+                        trajectory_handle.write(json.dumps(failed_record, ensure_ascii=False) + "\n")
+                        trajectory_handle.flush()
+                        continue
+
+                    request_path = config.request_dir / f"{scenario_id}__{tag}.json"
+                    raw_path = config.raw_dir / f"{scenario_id}__{tag}.json"
+                    compressor_payload = build_compressor_request_payload(
+                        config,
+                        schema_template,
+                        scenario,
+                        teacher_record["teacher_analysis"],
+                    )
+                    write_json(request_path, compressor_payload)
+
+                    print(f"compress_request scenario={scenario_id} sample={tag}")
+                    response = post_chat_completion(config, compressor_payload)
+                    write_json(raw_path, response)
+
+                    record = parse_trajectory_record(
+                        schema_template,
+                        scenario_id,
+                        config.profile,
+                        config.pipeline_mode,
+                        index,
+                        response,
+                    )
+                    record["teacher_parse_status"] = teacher_record["parse_status"]
+                    record["teacher_recommended_action_label"] = teacher_record.get(
+                        "recommended_action_label",
+                        "",
+                    )
+                    if teacher_record.get("usage"):
+                        record["teacher_usage"] = teacher_record["usage"]
+                    trajectory_handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    trajectory_handle.flush()
+        finally:
+            if teacher_handle is not None:
+                teacher_handle.close()
 
     summary_text = write_summary(config.trajectories_file, config.summary_file)
     print(summary_text, end="")
@@ -410,8 +775,11 @@ def main() -> None:
     config = load_config()
     validate_config(config)
     schema_template = load_schema_template(config)
+    teacher_schema_template = None
+    if config.pipeline_mode == "teacher_compress":
+        teacher_schema_template = load_teacher_schema_template(config)
     scenarios = discover_scenarios(config, args.scenarios)
-    run_generation(config, schema_template, scenarios)
+    run_generation(config, schema_template, teacher_schema_template, scenarios)
 
 
 if __name__ == "__main__":

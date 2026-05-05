@@ -1,0 +1,249 @@
+{
+  "schema_version": "teacher_analysis_v1",
+  "tool_name": "submit_teacher_analysis",
+  "tool_description": "Submit a richer teacher analysis before compressing it into a sparse state trajectory sample.",
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "schema_version": {
+        "type": "string",
+        "const": "teacher_analysis_v1"
+      },
+      "visible_world": {
+        "type": "array",
+        "minItems": 3,
+        "items": {
+          "type": "string"
+        }
+      },
+      "recalled_memory": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "self_state": {
+        "type": "array",
+        "minItems": 2,
+        "items": {
+          "type": "string"
+        }
+      },
+      "relationship_frame": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "entity": {
+              "type": "string"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "stance": {
+              "type": "string"
+            },
+            "responsibility": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "entity",
+            "relation",
+            "stance",
+            "responsibility"
+          ]
+        }
+      },
+      "goal_hierarchy": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "long_term": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mid_term": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "immediate": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "long_term",
+          "mid_term",
+          "immediate"
+        ]
+      },
+      "inferred_latents": {
+        "type": "array",
+        "minItems": 2,
+        "items": {
+          "type": "string"
+        }
+      },
+      "action_assessment": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 6,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action_label": {
+              "type": "string",
+              "description": "Primary action label, patched at runtime when scenario action options exist."
+            },
+            "fit_score": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "why_it_fits": {
+              "type": "string"
+            },
+            "main_tradeoff": {
+              "type": "string"
+            },
+            "failure_mode": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action_label",
+            "fit_score",
+            "why_it_fits",
+            "main_tradeoff",
+            "failure_mode"
+          ]
+        }
+      },
+      "recommended_packet": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action_label": {
+            "type": "string",
+            "description": "Recommended primary action label, patched at runtime when scenario action options exist."
+          },
+          "packet_type": {
+            "type": "string",
+            "enum": [
+              "act",
+              "speak",
+              "inspect",
+              "wait",
+              "delegate",
+              "ask_guardian",
+              "escalate",
+              "update_internal"
+            ]
+          },
+          "packet_target": {
+            "type": "string"
+          },
+          "packet_content": {
+            "type": "string"
+          },
+          "choice_reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action_label",
+          "packet_type",
+          "packet_target",
+          "packet_content",
+          "choice_reason"
+        ]
+      },
+      "compression_guidance": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "keep": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "trim": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "target_style": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "keep",
+          "trim",
+          "target_style"
+        ]
+      },
+      "quality_control": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "assistant_contamination_risk": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "over_explaining_risk": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "world_model_consistency": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "assistant_contamination_risk",
+          "over_explaining_risk",
+          "world_model_consistency",
+          "notes"
+        ]
+      }
+    },
+    "required": [
+      "schema_version",
+      "visible_world",
+      "recalled_memory",
+      "self_state",
+      "relationship_frame",
+      "goal_hierarchy",
+      "inferred_latents",
+      "action_assessment",
+      "recommended_packet",
+      "compression_guidance",
+      "quality_control"
+    ]
+  }
+}
