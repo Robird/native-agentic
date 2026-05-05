@@ -1,0 +1,298 @@
+{
+  "schema_version": "state_trajectory_v1",
+  "tool_name": "submit_trajectory",
+  "tool_description": "Submit a one-step state trajectory record for a continuously running agent.",
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "schema_version": {
+        "type": "string",
+        "const": "state_trajectory_v1",
+        "description": "Schema version for this trajectory sample."
+      },
+      "step_kind": {
+        "type": "string",
+        "enum": [
+          "single_step_projection"
+        ],
+        "description": "Current MVP only supports a single projected next-step."
+      },
+      "visible_world": {
+        "type": "array",
+        "description": "Sparse list of directly usable world facts visible at this step.",
+        "minItems": 1,
+        "items": {
+          "type": "string"
+        }
+      },
+      "recalled_memory": {
+        "type": "array",
+        "description": "Only the remembered facts actually used for this step.",
+        "items": {
+          "type": "string"
+        }
+      },
+      "self_state": {
+        "type": "array",
+        "description": "Sparse statements about the actor's internal state, capability or stance.",
+        "minItems": 1,
+        "items": {
+          "type": "string"
+        }
+      },
+      "relationship_frame": {
+        "type": "array",
+        "description": "Key entity relations active in this step.",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "entity": {
+              "type": "string"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "stance": {
+              "type": "string"
+            },
+            "responsibility": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "entity",
+            "relation",
+            "stance",
+            "responsibility"
+          ]
+        }
+      },
+      "active_goals": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "long_term": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mid_term": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "immediate": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "long_term",
+          "mid_term",
+          "immediate"
+        ]
+      },
+      "inferred_latents": {
+        "type": "array",
+        "description": "Latent risks, intentions or opportunities inferred from the visible situation.",
+        "minItems": 1,
+        "items": {
+          "type": "string"
+        }
+      },
+      "candidate_actions": {
+        "type": "array",
+        "description": "A short candidate set showing genuine trade-offs.",
+        "minItems": 2,
+        "maxItems": 5,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action_label": {
+              "type": "string",
+              "description": "Primary action label, patched at runtime when scenario action options exist."
+            },
+            "packet_type": {
+              "type": "string",
+              "enum": [
+                "act",
+                "speak",
+                "inspect",
+                "wait",
+                "delegate",
+                "ask_guardian",
+                "escalate",
+                "update_internal"
+              ]
+            },
+            "packet_target": {
+              "type": "string"
+            },
+            "packet_content": {
+              "type": "string"
+            },
+            "why_it_fits": {
+              "type": "string"
+            },
+            "principal_tradeoff": {
+              "type": "string"
+            },
+            "risk": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action_label",
+            "packet_type",
+            "packet_target",
+            "packet_content",
+            "why_it_fits",
+            "principal_tradeoff",
+            "risk"
+          ]
+        }
+      },
+      "chosen_action": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action_label": {
+            "type": "string",
+            "description": "Chosen primary action label, patched at runtime when scenario action options exist."
+          },
+          "other_action": {
+            "type": "string",
+            "description": "Required only when action_label is other."
+          },
+          "packet_type": {
+            "type": "string",
+            "enum": [
+              "act",
+              "speak",
+              "inspect",
+              "wait",
+              "delegate",
+              "ask_guardian",
+              "escalate",
+              "update_internal"
+            ]
+          },
+          "packet_target": {
+            "type": "string"
+          },
+          "packet_content": {
+            "type": "string"
+          },
+          "inner_orientation": {
+            "type": "string"
+          },
+          "expected_effect": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action_label",
+          "packet_type",
+          "packet_target",
+          "packet_content",
+          "inner_orientation",
+          "expected_effect"
+        ]
+      },
+      "state_updates": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "memory_notebook": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "goal_tree": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "self_state": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "world_model": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "memory_notebook",
+          "goal_tree",
+          "self_state",
+          "world_model"
+        ]
+      },
+      "quality_control": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "assistant_contamination_risk": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "over_explaining_risk": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "world_model_consistency": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "assistant_contamination_risk",
+          "over_explaining_risk",
+          "world_model_consistency",
+          "notes"
+        ]
+      }
+    },
+    "required": [
+      "schema_version",
+      "step_kind",
+      "visible_world",
+      "recalled_memory",
+      "self_state",
+      "relationship_frame",
+      "active_goals",
+      "inferred_latents",
+      "candidate_actions",
+      "chosen_action",
+      "state_updates",
+      "quality_control"
+    ]
+  }
+}
