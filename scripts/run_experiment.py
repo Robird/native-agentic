@@ -15,9 +15,14 @@ from typing import Any
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL_ID = "deepseek-v4-flash"
+DEFAULT_MODEL_PROFILE = "debug"
 DEFAULT_SAMPLES = 5
 DEFAULT_TEMPERATURE = 0.8
 DEFAULT_MODES = ["advice", "roleplay", "analysis", "story"]
+MODEL_PROFILE_TO_ID = {
+    "debug": "deepseek-v4-flash",
+    "release": "deepseek-v4-pro",
+}
 CALL_INSTRUCTION = (
     "你必须且只能调用一次 submit_decision 函数来提交结果。"
     "不要输出普通文本答案，不要输出函数外说明。"
@@ -30,6 +35,7 @@ class Config:
     scenario_dir: Path
     results_dir: Path
     base_url: str
+    model_profile: str
     model_id: str
     samples: int
     temperature: float
@@ -57,6 +63,18 @@ def env_list(name: str, default: list[str]) -> list[str]:
     return items or list(default)
 
 
+def resolve_model_settings() -> tuple[str, str]:
+    explicit_model_id = os.environ.get("MODEL_ID", "").strip()
+    if explicit_model_id:
+        return "explicit", explicit_model_id
+
+    model_profile = os.environ.get("MODEL_PROFILE", DEFAULT_MODEL_PROFILE).strip().lower()
+    if model_profile not in MODEL_PROFILE_TO_ID:
+        allowed = ", ".join(sorted(MODEL_PROFILE_TO_ID))
+        raise SystemExit(f"MODEL_PROFILE must be one of: {allowed}")
+    return model_profile, MODEL_PROFILE_TO_ID[model_profile]
+
+
 def load_config() -> Config:
     root_dir = Path(__file__).resolve().parent.parent
     scenario_dir = root_dir / "data" / "scenarios"
@@ -67,12 +85,14 @@ def load_config() -> Config:
     )
     run_dir = results_dir / run_id
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    model_profile, model_id = resolve_model_settings()
     return Config(
         root_dir=root_dir,
         scenario_dir=scenario_dir,
         results_dir=results_dir,
         base_url=os.environ.get("BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
-        model_id=os.environ.get("MODEL_ID", DEFAULT_MODEL_ID),
+        model_profile=model_profile,
+        model_id=model_id,
         samples=int(os.environ.get("SAMPLES", str(DEFAULT_SAMPLES))),
         temperature=float(os.environ.get("TEMPERATURE", str(DEFAULT_TEMPERATURE))),
         modes=env_list("MODES", DEFAULT_MODES),
@@ -381,7 +401,7 @@ def run_experiment(config: Config, scenarios: list[dict[str, Any]]) -> None:
     print(f"run_id={config.run_id}")
     print(f"run_dir={config.run_dir}")
     print(
-        f"model={config.model_id} samples={config.samples} temperature={config.temperature}"
+        f"model_profile={config.model_profile} model={config.model_id} samples={config.samples} temperature={config.temperature}"
     )
     print(f"modes={' '.join(config.modes)}")
 

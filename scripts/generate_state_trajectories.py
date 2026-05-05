@@ -15,12 +15,17 @@ from typing import Any
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL_ID = "deepseek-v4-flash"
+DEFAULT_MODEL_PROFILE = "debug"
 DEFAULT_SAMPLES = 3
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_PROFILE = "analysis_teacher_compress_v1"
 DEFAULT_SCHEMA_PATH = "schemas/state_trajectory_v1.json"
 DEFAULT_TEACHER_SCHEMA_PATH = "schemas/teacher_analysis_v1.json"
 DEFAULT_PIPELINE_MODE = "teacher_compress"
+MODEL_PROFILE_TO_ID = {
+    "debug": "deepseek-v4-flash",
+    "release": "deepseek-v4-pro",
+}
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,7 @@ class Config:
     teacher_schema_path: Path
     results_dir: Path
     base_url: str
+    model_profile: str
     model_id: str
     samples: int
     temperature: float
@@ -57,6 +63,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_model_settings() -> tuple[str, str]:
+    explicit_model_id = os.environ.get("MODEL_ID", "").strip()
+    if explicit_model_id:
+        return "explicit", explicit_model_id
+
+    model_profile = os.environ.get("MODEL_PROFILE", DEFAULT_MODEL_PROFILE).strip().lower()
+    if model_profile not in MODEL_PROFILE_TO_ID:
+        allowed = ", ".join(sorted(MODEL_PROFILE_TO_ID))
+        raise SystemExit(f"MODEL_PROFILE must be one of: {allowed}")
+    return model_profile, MODEL_PROFILE_TO_ID[model_profile]
+
+
 def load_config() -> Config:
     root_dir = Path(__file__).resolve().parent.parent
     scenario_dir = root_dir / "data" / "scenarios"
@@ -71,6 +89,7 @@ def load_config() -> Config:
         datetime.now(timezone.utc).strftime("trajectory-%Y%m%dT%H%M%SZ"),
     )
     run_dir = results_dir / run_id
+    model_profile, model_id = resolve_model_settings()
     return Config(
         root_dir=root_dir,
         scenario_dir=scenario_dir,
@@ -78,7 +97,8 @@ def load_config() -> Config:
         teacher_schema_path=teacher_schema_path,
         results_dir=results_dir,
         base_url=os.environ.get("BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
-        model_id=os.environ.get("MODEL_ID", DEFAULT_MODEL_ID),
+        model_profile=model_profile,
+        model_id=model_id,
         samples=int(os.environ.get("SAMPLES", str(DEFAULT_SAMPLES))),
         temperature=float(os.environ.get("TEMPERATURE", str(DEFAULT_TEMPERATURE))),
         profile=os.environ.get("TRAJECTORY_PROFILE", DEFAULT_PROFILE),
@@ -528,6 +548,7 @@ def write_manifest(
         "run_id": config.run_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "base_url": config.base_url,
+        "model_profile": config.model_profile,
         "model_id": config.model_id,
         "temperature": config.temperature,
         "samples": config.samples,
@@ -642,7 +663,7 @@ def run_generation(
     print(f"run_id={config.run_id}")
     print(f"run_dir={config.run_dir}")
     print(
-        f"model={config.model_id} samples={config.samples} temperature={config.temperature} profile={config.profile}"
+        f"model_profile={config.model_profile} model={config.model_id} samples={config.samples} temperature={config.temperature} profile={config.profile}"
     )
     print(f"pipeline={config.pipeline_mode}")
     print(f"schema={config.schema_path}")

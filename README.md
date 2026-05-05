@@ -11,6 +11,7 @@
 - `schemas/state_trajectory_v1.json`：状态轨迹语料的第一版机器可读 schema。
 - `schemas/teacher_analysis_v1.json`：分析教师中间稿的第一版 schema。
 - `docs/vision.md`：当前愿景与关键发现。
+- `docs/evaluation-principles.md`：评价标准的第一版方法论框架。
 - `docs/roadmap.md`：阶段性路线图。
 - `results/`：每次运行的请求、原始响应和聚合结果会落到这里。
 
@@ -35,11 +36,26 @@ MODES=roleplay SAMPLES=1 python3 scripts/run_experiment.py guard_unwinnable_001
 
 - `DEEPSEEK_API_KEY`：必填。
 - `BASE_URL`：默认 `https://api.deepseek.com`。
-- `MODEL_ID`：默认 `deepseek-v4-flash`。
+- `MODEL_PROFILE`：默认 `debug`。`debug -> deepseek-v4-flash`，`release -> deepseek-v4-pro`。
+- `MODEL_ID`：可直接覆盖具体模型名；设置后优先级高于 `MODEL_PROFILE`。
 - `SAMPLES`：每个场景、每个模式的采样次数，默认 `5`。
 - `TEMPERATURE`：默认 `0.8`。
 - `MODES`：空格分隔的模式列表，默认 `advice roleplay analysis story`。
 - `RUN_ID`：手动指定结果目录名。
+
+模型切换示例：
+
+```bash
+cd /repos/mental-model
+MODEL_PROFILE=debug python3 scripts/run_experiment.py guard_unwinnable_001
+MODEL_PROFILE=release python3 scripts/generate_state_trajectories.py guard_unwinnable_001
+```
+
+当前建议的用法分层：
+
+- `debug`：日常内环开发、prompt 调试、schema 调试、失败复现。
+- `release`：高价值教师样本生成、关键改动后的把关评测。
+- `MODEL_ID=...`：只有在需要临时指定具体模型时使用。
 
 状态轨迹生成器：
 
@@ -66,6 +82,7 @@ TRAJECTORY_PIPELINE=single_stage SAMPLES=1 python3 scripts/generate_state_trajec
 - `TRAJECTORY_PIPELINE`：默认 `teacher_compress`，可选 `single_stage`。
 - `SCHEMA_FILE`：默认 `schemas/state_trajectory_v1.json`。
 - `TEACHER_SCHEMA_FILE`：默认 `schemas/teacher_analysis_v1.json`。
+- `MODEL_PROFILE`：同上，可用于 debug/release 风格切换。
 
 输出说明：
 
