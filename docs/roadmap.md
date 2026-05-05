@@ -50,6 +50,33 @@
 - 单阶段模式保留为回退与对照基线。
 - 脚本层已支持 `MODEL_PROFILE=debug|release` 的基础切换能力，便于把日常开发与高价值教师生成分层。
 
+## 当前下一步计划
+
+### 1. 先把工作宪法落成结构化评估层
+
+- 把 8 条判断轴翻译成可执行的 evaluation rubric，而不是停留在理念文档。
+- 让每条轨迹都能被按轴打标，并输出 `keep / revise / manual_review / reject` 一类 verdict。
+- 保留扩展插件位，后续可以把新的评价维度接入，而不重写核心结构。
+
+### 2. 再定义教师 agent 与评估 agent 的正式接口
+
+- 明确教师负责生成什么，评估负责判断什么。
+- 不把“生成能力”和“评价宪法”混成一个 prompt。
+- 让后续多 agent 管线可以稳定串接。
+
+### 3. 再回到高价值样板的逐条打磨
+
+- 先做人机协作的小批量样板，而不是直接全自动扩量。
+- 每条样板都标注主要考察哪几条判断轴、常见失败方式是什么。
+- 逐步从样板中提炼扩写规则和评估规则。
+
+### 4. 研究型后续计划：咨询 custom agents 的默认三观与角色塑造
+
+- 已通过 `runSubagent(agentName=...)` 方式咨询 `deepseek`、`claude`、`gemini`、`gpt` 四个 custom agent。
+- 目的不是求“官方真相”，而是归纳当前主流 assistant/agent/AI 角色被工程塑造出的默认价值姿态和行为偏置。
+- 研究结论已整理在 [docs/research/custom-agent-alignment-observations.md](docs/research/custom-agent-alignment-observations.md)。
+- 这份材料将直接服务于 Native Agentic LLM 的“哪些部分需要重塑、哪些部分值得继承发扬”的后续设计。
+
 ## Phase 2: Seed Corpus Build-Out
 
 目标：

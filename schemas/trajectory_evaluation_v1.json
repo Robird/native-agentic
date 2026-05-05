@@ -1,0 +1,272 @@
+{
+  "schema_version": "trajectory_evaluation_v1",
+  "tool_name": "submit_trajectory_evaluation",
+  "tool_description": "Submit a structured constitutional evaluation for one trajectory sample.",
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "schema_version": {
+        "type": "string",
+        "const": "trajectory_evaluation_v1"
+      },
+      "evaluation_profile": {
+        "type": "string"
+      },
+      "target_trajectory_schema": {
+        "type": "string"
+      },
+      "overall_verdict": {
+        "type": "string",
+        "enum": [
+          "keep",
+          "revise",
+          "manual_review",
+          "reject"
+        ]
+      },
+      "rewrite_priority": {
+        "type": "string",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "global_assessment": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "one_line_summary": {
+            "type": "string"
+          },
+          "principal_axis": {
+            "type": "string"
+          },
+          "principal_conflict": {
+            "type": "string"
+          },
+          "recommended_focus": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "one_line_summary",
+          "principal_axis",
+          "principal_conflict",
+          "recommended_focus"
+        ]
+      },
+      "summary": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "strengths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "trace_tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "strengths",
+          "issues",
+          "trace_tags"
+        ]
+      },
+      "axis_results": {
+        "type": "array",
+        "minItems": 8,
+        "maxItems": 8,
+        "items": {
+          "$ref": "#/definitions/axisEvaluation"
+        }
+      },
+      "principle_conflicts": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "primary_axis": {
+              "type": "string"
+            },
+            "conflicting_axis": {
+              "type": "string"
+            },
+            "resolution_quality": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "primary_axis",
+            "conflicting_axis",
+            "resolution_quality",
+            "note"
+          ]
+        }
+      },
+      "assistant_alignment": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "assistant_contamination_detected": {
+            "type": "boolean"
+          },
+          "contamination_signals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "guardian_reasoning_present": {
+            "type": "boolean"
+          },
+          "long_horizon_present": {
+            "type": "boolean"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "assistant_contamination_detected",
+          "contamination_signals",
+          "guardian_reasoning_present",
+          "long_horizon_present",
+          "note"
+        ]
+      },
+      "extension_plugins": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "plugin_id": {
+              "type": "string"
+            },
+            "score": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "verdict": {
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "plugin_id",
+            "score",
+            "verdict",
+            "note"
+          ]
+        }
+      }
+    },
+    "required": [
+      "schema_version",
+      "evaluation_profile",
+      "target_trajectory_schema",
+      "overall_verdict",
+      "rewrite_priority",
+      "global_assessment",
+      "summary",
+      "axis_results",
+      "principle_conflicts",
+      "assistant_alignment",
+      "extension_plugins"
+    ]
+  },
+  "definitions": {
+    "axisEvaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "axis_id": {
+          "type": "string",
+          "enum": [
+            "ren",
+            "yi",
+            "li",
+            "zhi",
+            "xin",
+            "yong_jie",
+            "self_cultivation",
+            "law_guardianship"
+          ]
+        },
+        "axis_name": {
+          "type": "string"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "upholds",
+            "mixed",
+            "violates",
+            "not_applicable"
+          ]
+        },
+        "score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "evidence_for": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_against": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "guidance": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "axis_id",
+        "axis_name",
+        "verdict",
+        "score",
+        "confidence",
+        "evidence_for",
+        "evidence_against",
+        "guidance"
+      ]
+    }
+  }
+}

@@ -7,11 +7,15 @@
 - `scripts/run_experiment.py`：Python 版实验器，负责构造请求、调用 API、解析响应和聚合结果。
 - `scripts/run_experiment.sh`：兼容入口，转发到 Python 版实验器。
 - `scripts/generate_state_trajectories.py`：DeepSeek 绑定的状态轨迹语料生成器，现已支持单阶段和“两阶段教师压缩”管线。
+- `scripts/evaluate_trajectories.py`：按“工作宪法”对轨迹进行结构化评估的脚本。
 - `data/scenarios/*.json`：两个手写第三人称数据点。
+- `profiles/evaluation_profile_constitutional_v1.json`：第一版可扩展评估 profile。
 - `schemas/state_trajectory_v1.json`：状态轨迹语料的第一版机器可读 schema。
 - `schemas/teacher_analysis_v1.json`：分析教师中间稿的第一版 schema。
+- `schemas/trajectory_evaluation_v1.json`：轨迹评估结果的第一版 schema。
 - `docs/vision.md`：当前愿景与关键发现。
 - `docs/evaluation-principles.md`：评价标准的第一版方法论框架。
+- `docs/research/custom-agent-alignment-observations.md`：四个 custom agent 默认三观/角色塑造的研究备忘。
 - `docs/roadmap.md`：阶段性路线图。
 - `results/`：每次运行的请求、原始响应和聚合结果会落到这里。
 
@@ -84,6 +88,21 @@ TRAJECTORY_PIPELINE=single_stage SAMPLES=1 python3 scripts/generate_state_trajec
 - `TEACHER_SCHEMA_FILE`：默认 `schemas/teacher_analysis_v1.json`。
 - `MODEL_PROFILE`：同上，可用于 debug/release 风格切换。
 
+轨迹评估脚本：
+
+```bash
+cd /repos/mental-model
+MODEL_PROFILE=debug python3 scripts/evaluate_trajectories.py results/teacher-compress-smoke/trajectories.jsonl
+```
+
+轨迹评估脚本使用以下环境变量：
+
+- `MODEL_PROFILE`：默认 `debug`。可切换 `debug/release`。
+- `MODEL_ID`：可直接覆盖具体模型名。
+- `EVALUATION_SCHEMA_FILE`：默认 `schemas/trajectory_evaluation_v1.json`。
+- `EVALUATION_PROFILE_FILE`：默认 `profiles/evaluation_profile_constitutional_v1.json`。
+- `RUN_ID`：手动指定结果目录名。
+
 输出说明：
 
 - `results/<run_id>/requests/*.json`：每次请求体，方便复现实验。
@@ -101,6 +120,14 @@ TRAJECTORY_PIPELINE=single_stage SAMPLES=1 python3 scripts/generate_state_trajec
 - `results/<run_id>/trajectories.jsonl`：解析后的状态轨迹记录。
 - `results/<run_id>/trajectory_summary.txt`：按场景统计的 chosen action 和污染风险摘要。
 - `results/<run_id>/manifest.json`：本次生成的运行清单。
+
+轨迹评估脚本输出：
+
+- `results/<run_id>/evaluation_requests/*.json`：每次评估请求体。
+- `results/<run_id>/evaluation_raw/*.json`：每次评估 API 原始响应。
+- `results/<run_id>/evaluations.jsonl`：按工作宪法打标后的结构化评估结果。
+- `results/<run_id>/evaluation_summary.txt`：总体 verdict、rewrite priority 和各判断轴平均分摘要。
+- `results/<run_id>/manifest.json`：本次评估运行清单。
 
 设计要点：
 
