@@ -12,6 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from packet_review_kernel import (
+    AttemptContext,
+    ProvenancePaths,
+    build_sample_packet,
+    rel_to_root,
+    resolve_provenance_paths,
+    scenario_snapshot,
+    validate_packet,
+)
+
 
 DEFAULT_RESULTS_DIR = "results"
 DEFAULT_RUN_ID_PREFIX = "sample-pipeline"
@@ -23,6 +33,9 @@ DEFAULT_EVALUATION_PROFILE_PATH = "profiles/evaluation_profile_constitutional_v1
 DEFAULT_EVALUATION_SCHEMA_PATH = "schemas/trajectory_evaluation_v1.json"
 DEFAULT_TRAJECTORY_PROFILE = "analysis_teacher_compress_v1"
 DEFAULT_TRAJECTORY_PIPELINE = "teacher_compress"
+PIPELINE_MANIFEST_VERSION = "pipeline_manifest_index_v1"
+GENERATOR_STAGE_RUN_ID = "generate"
+EVALUATOR_STAGE_RUN_ID = "evaluate"
 DEFAULT_SAMPLES = 3
 DEFAULT_MAX_REPAIR_ATTEMPTS = 1
 DEFAULT_MIN_REPAIR_SCORE_DELTA = 1.0
@@ -63,9 +76,8 @@ class Config:
     evaluator_input_schema_path: Path
     generator_script: Path
     evaluator_script: Path
-    generator_run_id: str
-    evaluator_run_id: str
     samples: int
+    write_interfaces: bool
     auto_repair: bool
     max_repair_attempts: int
     stop_on_no_progress: bool
@@ -74,6 +86,28 @@ class Config:
     trajectory_pipeline: str
     evaluation_profile_file: str
     evaluation_schema_file: str
+
+    @property
+    def generator_run_id(self) -> str:
+        return GENERATOR_STAGE_RUN_ID
+
+    @property
+    def evaluator_run_id(self) -> str:
+        return EVALUATOR_STAGE_RUN_ID
+
+
+@dataclass(frozen=True)
+class RepairAttemptResult:
+    attempt_dir: Path
+    instruction: dict[str, Any]
+    instruction_path: Path
+    reused_teacher_analysis: bool
+    generation_manifest: dict[str, Any]
+    trajectory_row: dict[str, Any]
+    teacher_row: dict[str, Any] | None
+    evaluation_manifest: dict[str, Any]
+    evaluation_row: dict[str, Any] | None
+    provenance_paths: ProvenancePaths
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,9 +158,8 @@ def load_config() -> Config:
         / os.environ.get("EVALUATOR_INPUT_SCHEMA_FILE", DEFAULT_EVALUATOR_INPUT_SCHEMA_PATH),
         generator_script=root_dir / "scripts" / "generate_state_trajectories.py",
         evaluator_script=root_dir / "scripts" / "evaluate_trajectories.py",
-        generator_run_id="generate",
-        evaluator_run_id="evaluate",
         samples=int(os.environ.get("SAMPLES", str(DEFAULT_SAMPLES))),
+        write_interfaces=env_flag("WRITE_INTERFACES", False),
         auto_repair=env_flag("AUTO_REPAIR", False),
         max_repair_attempts=int(
             os.environ.get("MAX_REPAIR_ATTEMPTS", str(DEFAULT_MAX_REPAIR_ATTEMPTS))
@@ -191,11 +224,11 @@ def discover_scenarios(config: Config, selected_ids: list[str]) -> list[dict[str
 
 def ensure_output_dirs(config: Config) -> None:
     config.packet_dir.mkdir(parents=True, exist_ok=False)
-    config.teacher_input_dir.mkdir(parents=True, exist_ok=False)
-    config.evaluator_input_dir.mkdir(parents=True, exist_ok=False)
+    if config.write_interfaces:
+        config.teacher_input_dir.mkdir(parents=True, exist_ok=False)
+        config.evaluator_input_dir.mkdir(parents=True, exist_ok=False)
     if config.auto_repair:
         config.repairs_dir.mkdir(parents=True, exist_ok=False)
-        config.repair_summary_file.write_text("", encoding="utf-8")
     config.sample_packets_file.write_text("", encoding="utf-8")
 
 
@@ -216,10 +249,18 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def rel_to_root(config: Config, path: Path | None) -> str | None:
-    if path is None or not path.exists():
+def materialize_interface_input(
+    path: Path | None,
+    payload: dict[str, Any],
+    *,
+    enabled: bool,
+) -> Path | None:
+    if path is None:
         return None
-    return str(path.relative_to(config.root_dir))
+    if enabled:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, payload)
+    return path
 
 
 def sample_key(scenario_id: str, sample_index: int) -> str:
@@ -250,14 +291,13 @@ def build_generator_env(
     config: Config,
     *,
     results_dir: Path | None = None,
-    run_id: str | None = None,
     samples: int | None = None,
     repair_instruction_path: Path | None = None,
     reuse_teacher_analysis_path: Path | None = None,
 ) -> dict[str, str]:
     env = stage_env(os.environ, "GENERATOR")
     env["RESULTS_DIR"] = str(results_dir or config.run_dir)
-    env["RUN_ID"] = run_id or config.generator_run_id
+    env["RUN_ID"] = GENERATOR_STAGE_RUN_ID
     env["SAMPLES"] = str(samples if samples is not None else config.samples)
     env["TRAJECTORY_PROFILE"] = config.trajectory_profile
     env["TRAJECTORY_PIPELINE"] = config.trajectory_pipeline
@@ -276,25 +316,13 @@ def build_evaluator_env(
     config: Config,
     *,
     results_dir: Path | None = None,
-    run_id: str | None = None,
 ) -> dict[str, str]:
     env = stage_env(os.environ, "EVALUATOR")
     env["RESULTS_DIR"] = str(results_dir or config.run_dir)
-    env["RUN_ID"] = run_id or config.evaluator_run_id
+    env["RUN_ID"] = EVALUATOR_STAGE_RUN_ID
     env["EVALUATION_PROFILE_FILE"] = config.evaluation_profile_file
     env["EVALUATION_SCHEMA_FILE"] = config.evaluation_schema_file
     return env
-
-
-def scenario_snapshot(scenario: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": scenario["id"],
-        "name": scenario["name"],
-        "profile": scenario["profile"],
-        "situation": scenario["situation"],
-        "task": scenario["task"],
-        "action_options": list(scenario.get("action_options", [])),
-    }
 
 
 def build_teacher_input(
@@ -364,7 +392,7 @@ def build_repair_analysis(
     config: Config,
     source_packet: dict[str, Any],
     result_packet: dict[str, Any],
-    repair_result: dict[str, Any],
+    repair_result: RepairAttemptResult,
 ) -> dict[str, Any]:
     source_verdict = source_packet["summary"].get("overall_verdict", "")
     result_verdict = result_packet["summary"].get("overall_verdict", "")
@@ -397,8 +425,8 @@ def build_repair_analysis(
     return {
         "attempt_index": result_packet["attempt_metadata"]["attempt_index"],
         "sample_id": result_packet["sample_id"],
-        "repair_action": repair_result["instruction"]["next_action"],
-        "repair_target": repair_result["instruction"]["repair_target"],
+        "repair_action": repair_result.instruction["next_action"],
+        "repair_target": repair_result.instruction["repair_target"],
         "source_overall_verdict": source_verdict,
         "result_overall_verdict": result_verdict,
         "source_primary_failure": source_primary_failure,
@@ -447,7 +475,7 @@ def build_repair_summary_record(
     config: Config,
     source_packet: dict[str, Any],
     result_packet: dict[str, Any],
-    repair_result: dict[str, Any],
+    repair_result: RepairAttemptResult,
     repair_analysis: dict[str, Any],
     repair_gate: dict[str, Any],
 ) -> dict[str, Any]:
@@ -459,7 +487,7 @@ def build_repair_summary_record(
         "attempt_index": result_packet["attempt_metadata"]["attempt_index"],
         "repair_action": repair_analysis["repair_action"],
         "repair_target": repair_analysis["repair_target"],
-        "reused_teacher_analysis": repair_result["reused_teacher_analysis"],
+        "reused_teacher_analysis": repair_result.reused_teacher_analysis,
         "source_review_state": snapshot_review_state(source_packet["review_state"]),
         "result_review_state": snapshot_review_state(result_packet["review_state"]),
         "source_overall_verdict": repair_analysis["source_overall_verdict"],
@@ -473,9 +501,15 @@ def build_repair_summary_record(
         "made_progress": repair_analysis["made_progress"],
         "continue_repair": repair_gate["continue_repair"],
         "stop_reason": repair_gate["stop_reason"],
-        "instruction_ref": rel_to_root(config, repair_result["instruction_path"]),
-        "generation_manifest_ref": rel_to_root(config, repair_result["generation_manifest_path"]),
-        "evaluation_manifest_ref": rel_to_root(config, repair_result["evaluation_manifest_path"]),
+        "instruction_ref": rel_to_root(config, repair_result.instruction_path),
+        "generation_manifest_ref": rel_to_root(
+            config,
+            repair_result.provenance_paths.generation_manifest_path,
+        ),
+        "evaluation_manifest_ref": rel_to_root(
+            config,
+            repair_result.provenance_paths.evaluation_manifest_path,
+        ),
     }
 
 
@@ -595,7 +629,7 @@ def load_generation_stage_outputs(
     root_dir: Path,
     base_run_dir: Path,
 ) -> tuple[Path, dict[str, Any], list[dict[str, Any]], dict[tuple[str, int], dict[str, Any]]]:
-    generation_manifest_path = base_run_dir / "generate" / "manifest.json"
+    generation_manifest_path = base_run_dir / GENERATOR_STAGE_RUN_ID / "manifest.json"
     generation_manifest = load_json(generation_manifest_path)
     trajectories_file = root_dir / generation_manifest["output_files"]["trajectories"]
     trajectory_rows = load_jsonl(trajectories_file)
@@ -613,7 +647,7 @@ def load_evaluation_stage_outputs(
     root_dir: Path,
     base_run_dir: Path,
 ) -> tuple[Path, dict[str, Any], list[dict[str, Any]], dict[tuple[str, int], dict[str, Any]]]:
-    evaluation_manifest_path = base_run_dir / "evaluate" / "manifest.json"
+    evaluation_manifest_path = base_run_dir / EVALUATOR_STAGE_RUN_ID / "manifest.json"
     evaluation_manifest = load_json(evaluation_manifest_path)
     evaluations_file = root_dir / evaluation_manifest["output_files"]["evaluations"]
     evaluation_rows = load_jsonl(evaluations_file)
@@ -628,7 +662,7 @@ def execute_repair_attempt(
     scenario: dict[str, Any],
     source_packet: dict[str, Any],
     attempt_index: int,
-) -> dict[str, Any]:
+) -> RepairAttemptResult:
     row_key = sample_key(source_packet["scenario_id"], source_packet["sample_index"])
     attempt_dir = config.repairs_dir / row_key / f"attempt_{attempt_index:02d}"
     attempt_dir.mkdir(parents=True, exist_ok=False)
@@ -662,7 +696,6 @@ def execute_repair_attempt(
     generator_env = build_generator_env(
         config,
         results_dir=attempt_dir,
-        run_id=config.generator_run_id,
         samples=1,
         repair_instruction_path=instruction_path,
         reuse_teacher_analysis_path=reuse_teacher_analysis_path,
@@ -689,7 +722,6 @@ def execute_repair_attempt(
     evaluator_env = build_evaluator_env(
         config,
         results_dir=attempt_dir,
-        run_id=config.evaluator_run_id,
     )
     run_stage(evaluator_command, evaluator_env, config.root_dir)
 
@@ -699,484 +731,85 @@ def execute_repair_attempt(
     )
     evaluation_row = evaluation_index.get((trajectory_row["scenario_id"], trajectory_row["sample_index"]))
 
-    interface_dir = attempt_dir / "interfaces"
-    interface_dir.mkdir(parents=True, exist_ok=True)
     teacher_input_path = None
     if generation_manifest["pipeline_mode"] == "teacher_compress":
-        teacher_input_path = interface_dir / "teacher_input.json"
-        write_json(teacher_input_path, build_teacher_input(scenario, generation_manifest))
+        teacher_input_path = materialize_interface_input(
+            attempt_dir / "interfaces" / "teacher_input.json",
+            build_teacher_input(scenario, generation_manifest),
+            enabled=config.write_interfaces,
+        )
 
     evaluator_input_path = None
     if trajectory_row.get("parse_status") == "ok" and trajectory_row.get("trajectory"):
-        evaluator_input_path = interface_dir / "evaluator_input.json"
-        write_json(
-            evaluator_input_path,
+        evaluator_input_path = materialize_interface_input(
+            attempt_dir / "interfaces" / "evaluator_input.json",
             build_evaluator_input(scenario, trajectory_row, evaluation_manifest),
+            enabled=config.write_interfaces,
         )
 
-    return {
-        "attempt_dir": attempt_dir,
-        "instruction": repair_instruction,
-        "instruction_path": instruction_path,
-        "reused_teacher_analysis": reuse_teacher_analysis_path is not None,
-        "generation_manifest_path": generation_manifest_path,
-        "generation_manifest": generation_manifest,
-        "trajectory_row": trajectory_row,
-        "teacher_row": teacher_row,
-        "evaluation_manifest_path": evaluation_manifest_path,
-        "evaluation_manifest": evaluation_manifest,
-        "evaluation_row": evaluation_row,
-        "teacher_input_path": teacher_input_path,
-        "evaluator_input_path": evaluator_input_path,
-    }
+    return RepairAttemptResult(
+        attempt_dir=attempt_dir,
+        instruction=repair_instruction,
+        instruction_path=instruction_path,
+        reused_teacher_analysis=reuse_teacher_analysis_path is not None,
+        generation_manifest=generation_manifest,
+        trajectory_row=trajectory_row,
+        teacher_row=teacher_row,
+        evaluation_manifest=evaluation_manifest,
+        evaluation_row=evaluation_row,
+        provenance_paths=resolve_provenance_paths(
+            config,
+            generation_manifest_path=generation_manifest_path,
+            generation_manifest=generation_manifest,
+            evaluation_manifest_path=evaluation_manifest_path,
+            evaluation_manifest=evaluation_manifest,
+            row_key=row_key,
+            teacher_input_path=teacher_input_path,
+            evaluator_input_path=evaluator_input_path,
+        ),
+    )
 
 
 def build_repair_history_entry(
     config: Config,
     source_packet: dict[str, Any],
     result_packet: dict[str, Any],
-    repair_result: dict[str, Any],
+    repair_result: RepairAttemptResult,
 ) -> dict[str, Any]:
     return {
         "attempt_index": result_packet["attempt_metadata"]["attempt_index"],
-        "next_action": repair_result["instruction"]["next_action"],
-        "repair_target": repair_result["instruction"]["repair_target"],
-        "instruction_ref": rel_to_root(config, repair_result["instruction_path"]),
-        "reused_teacher_analysis": repair_result["reused_teacher_analysis"],
+        "next_action": repair_result.instruction["next_action"],
+        "repair_target": repair_result.instruction["repair_target"],
+        "instruction_ref": rel_to_root(config, repair_result.instruction_path),
+        "reused_teacher_analysis": repair_result.reused_teacher_analysis,
         "source_review_state": snapshot_review_state(source_packet["review_state"]),
         "source_primary_failure": source_packet["summary"].get("primary_failure_id"),
         "result_review_state": snapshot_review_state(result_packet["review_state"]),
         "result_primary_failure": result_packet["summary"].get("primary_failure_id"),
-        "generation_manifest_ref": rel_to_root(config, repair_result["generation_manifest_path"]),
-        "evaluation_manifest_ref": rel_to_root(config, repair_result["evaluation_manifest_path"]),
+        "generation_manifest_ref": rel_to_root(
+            config,
+            repair_result.provenance_paths.generation_manifest_path,
+        ),
+        "evaluation_manifest_ref": rel_to_root(
+            config,
+            repair_result.provenance_paths.evaluation_manifest_path,
+        ),
     }
 
 
-def empty_failure_assessment(taxonomy_profile_id: str | None) -> dict[str, Any]:
-    return {
-        "taxonomy_profile": taxonomy_profile_id,
-        "primary_failure_id": "none",
-        "highest_severity": "none",
-        "failure_tags": [],
-    }
-
-
-def build_failure_tag(
-    failure_defaults: dict[str, dict[str, Any]],
-    failure_id: str,
-    evidence: list[str],
-    guidance: str,
-    *,
-    severity: str | None = None,
-    confidence: int = 100,
-) -> dict[str, Any]:
-    failure = failure_defaults.get(failure_id, {})
-    return {
-        "failure_id": failure_id,
-        "label": failure.get("label", failure_id),
-        "category": failure.get("category", "unknown"),
-        "severity": severity or failure.get("default_severity", "high"),
-        "confidence": confidence,
-        "repair_stage": failure.get("preferred_repair_stage", "manual"),
-        "evidence": evidence,
-        "guidance": guidance or failure.get("description", ""),
-    }
-
-
-def fallback_failure_assessment(
-    taxonomy_profile_id: str | None,
-    failure_defaults: dict[str, dict[str, Any]],
-    failure_id: str,
-    evidence: list[str],
-    guidance: str,
-) -> dict[str, Any]:
-    tag = build_failure_tag(failure_defaults, failure_id, evidence, guidance)
-    return {
-        "taxonomy_profile": taxonomy_profile_id,
-        "primary_failure_id": failure_id,
-        "highest_severity": tag["severity"],
-        "failure_tags": [tag],
-    }
-
-
-def fallback_feedback_decision(
-    protocol_id: str | None,
-    rule_id: str,
-    suggested_status: str,
-    suggested_next_action: str,
-    preferred_repair_stage: str,
-    urgency: str,
-    blocking: bool,
-    rationale: str,
-) -> dict[str, Any]:
-    return {
-        "protocol_id": protocol_id,
-        "rule_id": rule_id,
-        "suggested_status": suggested_status,
-        "suggested_next_action": suggested_next_action,
-        "preferred_repair_stage": preferred_repair_stage,
-        "urgency": urgency,
-        "blocking": blocking,
-        "rationale": rationale,
-    }
-
-
-def resolve_feedback_and_failures(
-    trajectory_row: dict[str, Any],
-    evaluation_row: dict[str, Any] | None,
-    teacher_used: bool,
-    protocol_id: str | None,
-    taxonomy_profile_id: str | None,
-    failure_defaults: dict[str, dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    if trajectory_row.get("parse_status") != "ok":
-        parse_status = trajectory_row.get("parse_status", "")
-        if teacher_used and trajectory_row.get("teacher_parse_status") == "ok":
-            failure_assessment = fallback_failure_assessment(
-                taxonomy_profile_id,
-                failure_defaults,
-                "schema_structure_instability",
-                [f"trajectory parse_status={parse_status}", "teacher_parse_status=ok"],
-                "Teacher stage succeeded but the final trajectory output was not structurally reliable; rerun from teacher or repair compressor prompting.",
-            )
-            feedback_decision = fallback_feedback_decision(
-                protocol_id,
-                "fallback_regenerate_after_parse_failure",
-                "needs_revision",
-                "regenerate_from_teacher",
-                "teacher_stage",
-                "high",
-                True,
-                "Final trajectory parse failed after a successful teacher stage; regenerate from teacher rather than approving or locally patching the packet.",
-            )
-            return failure_assessment, feedback_decision
-
-        failure_assessment = fallback_failure_assessment(
-            taxonomy_profile_id,
-            failure_defaults,
-            "schema_structure_instability",
-            [f"trajectory parse_status={parse_status}"],
-            "Generation output is structurally unstable and cannot be routed automatically with confidence.",
-        )
-        feedback_decision = fallback_feedback_decision(
-            protocol_id,
-            "fallback_rerun_generation",
-            "manual_review",
-            "rerun_generation",
-            "generation_rerun",
-            "high",
-            True,
-            "Generation output was structurally unusable before evaluation; rerun generation or inspect the transport/prompt failure.",
-        )
-        return failure_assessment, feedback_decision
-
-    if evaluation_row is None or evaluation_row.get("parse_status") != "ok":
-        parse_status = evaluation_row.get("parse_status", "missing_evaluation") if evaluation_row else "missing_evaluation"
-        failure_assessment = fallback_failure_assessment(
-            taxonomy_profile_id,
-            failure_defaults,
-            "schema_structure_instability",
-            [f"evaluation parse_status={parse_status}"],
-            "Evaluation output was not trustworthy enough for automatic routing; inspect the evaluator contract or rerun evaluation.",
-        )
-        feedback_decision = fallback_feedback_decision(
-            protocol_id,
-            "fallback_manual_review_evaluation_failure",
-            "manual_review",
-            "manual_review",
-            "manual",
-            "high",
-            True,
-            "Evaluator output could not be trusted automatically, so this sample must be reviewed manually.",
-        )
-        return failure_assessment, feedback_decision
-
-    failure_assessment = evaluation_row.get("failure_assessment") or empty_failure_assessment(
-        taxonomy_profile_id,
-    )
-    feedback_decision = evaluation_row.get("feedback_decision")
-    if feedback_decision:
-        return failure_assessment, feedback_decision
-
-    verdict = evaluation_row.get("overall_verdict", "")
-    if verdict == "keep":
-        feedback_decision = fallback_feedback_decision(
-            protocol_id,
-            "fallback_approve_keep",
-            "approved",
-            "approve",
-            "none",
-            "low",
-            False,
-            "Keep verdict without an explicit feedback decision falls back to direct approval.",
-        )
-        return failure_assessment, feedback_decision
-
-    if verdict == "reject":
-        feedback_decision = fallback_feedback_decision(
-            protocol_id,
-            "fallback_reject_verdict",
-            "rejected",
-            "reject",
-            "dataset_policy",
-            "high",
-            True,
-            "Reject verdict without explicit feedback decision falls back to dataset rejection.",
-        )
-        return failure_assessment, feedback_decision
-
-    if verdict == "manual_review":
-        feedback_decision = fallback_feedback_decision(
-            protocol_id,
-            "fallback_manual_review_verdict",
-            "manual_review",
-            "manual_review",
-            "manual",
-            "high",
-            True,
-            "Manual-review verdict without explicit feedback decision falls back to manual review.",
-        )
-        return failure_assessment, feedback_decision
-
-    next_action = "regenerate_from_teacher" if teacher_used else "revise_prompt_local"
-    preferred_repair_stage = "teacher_stage" if teacher_used else "trajectory_prompt"
-    primary_failure_id = failure_assessment.get("primary_failure_id")
-    if primary_failure_id and primary_failure_id in failure_defaults:
-        preferred_repair_stage = failure_defaults[primary_failure_id].get(
-            "preferred_repair_stage",
-            preferred_repair_stage,
-        )
-        default_next_action = failure_defaults[primary_failure_id].get("default_next_action")
-        if default_next_action:
-            next_action = default_next_action
-        if next_action == "regenerate_from_teacher" and not teacher_used:
-            next_action = "revise_prompt_local"
-
-    feedback_decision = fallback_feedback_decision(
-        protocol_id,
-        "fallback_revise_verdict",
-        "needs_revision",
-        next_action,
-        preferred_repair_stage,
-        "medium",
-        True,
-        "Revise verdict without explicit feedback decision falls back to the dominant repair stage implied by the failure taxonomy.",
-    )
-    return failure_assessment, feedback_decision
-
-
-def review_state(feedback_decision: dict[str, Any], failure_assessment: dict[str, Any]) -> dict[str, str]:
-    reason = feedback_decision.get("rule_id") or "feedback_decision"
-    primary_failure_id = failure_assessment.get("primary_failure_id")
-    if primary_failure_id and primary_failure_id != "none":
-        reason = f"{reason}:{primary_failure_id}"
-    return {
-        "status": feedback_decision.get("suggested_status", "manual_review"),
-        "next_action": feedback_decision.get("suggested_next_action", "manual_review"),
-        "reason": reason,
-    }
-
-
-def validate_packet(packet: dict[str, Any]) -> None:
-    if packet.get("schema_version") != "sample_packet_v1":
-        raise ValueError("sample packet schema_version mismatch")
-    if packet["scenario_id"] != packet["scenario"]["id"]:
-        raise ValueError("scenario_id does not match scenario snapshot")
-    if packet["contracts"]["teacher_agent"]["status"] == "completed" and packet["artifacts"]["teacher_analysis"] is None:
-        raise ValueError("teacher contract marked completed without teacher artifact")
-    if packet["artifacts"]["trajectory"] is None and packet["summary"]["generation_parse_status"] == "ok":
-        raise ValueError("trajectory parse status ok but trajectory artifact missing")
-    if packet["contracts"]["evaluator_agent"]["status"] == "completed" and packet["artifacts"]["evaluation"] is None:
-        raise ValueError("evaluator contract marked completed without evaluation artifact")
-    if packet["review_state"]["status"] == "approved" and packet["summary"]["overall_verdict"] != "keep":
-        raise ValueError("approved packet must have keep verdict")
-    if packet["feedback_decision"]["suggested_status"] != packet["review_state"]["status"]:
-        raise ValueError("review_state status must match feedback_decision")
-    if packet["feedback_decision"]["suggested_next_action"] != packet["review_state"]["next_action"]:
-        raise ValueError("review_state next_action must match feedback_decision")
-    attempt_metadata = packet.get("attempt_metadata") or {}
-    attempt_index = attempt_metadata.get("attempt_index")
-    attempt_kind = attempt_metadata.get("attempt_kind")
-    if attempt_kind == "initial" and attempt_index != 0:
-        raise ValueError("initial packet must have attempt_index=0")
-    if attempt_kind == "repair" and (not isinstance(attempt_index, int) or attempt_index < 1):
-        raise ValueError("repair packet must have attempt_index>=1")
-    repair_history = packet.get("repair_history") or []
-    if attempt_index == 0 and repair_history:
-        raise ValueError("initial packet cannot contain repair history")
-    if isinstance(attempt_index, int) and len(repair_history) > attempt_index:
-        raise ValueError("repair history cannot exceed current attempt index")
-
-
-def maybe_path(base_dir: Path | None, key: str) -> Path | None:
-    if base_dir is None:
-        return None
-    path = base_dir / f"{key}.json"
-    if path.exists():
-        return path
-    return None
-
-
-def build_sample_packet(
-    config: Config,
-    scenario: dict[str, Any],
-    trajectory_row: dict[str, Any],
-    teacher_row: dict[str, Any] | None,
-    evaluation_row: dict[str, Any] | None,
+def resolve_daily_model_profile(
     generation_manifest: dict[str, Any],
     evaluation_manifest: dict[str, Any],
-    generation_manifest_path: Path,
-    evaluation_manifest_path: Path,
-    teacher_input_path: Path | None,
-    evaluator_input_path: Path | None,
-    teacher_request_path: Path | None,
-    teacher_raw_path: Path | None,
-    trajectory_request_path: Path | None,
-    trajectory_raw_path: Path | None,
-    evaluation_request_path: Path | None,
-    evaluation_raw_path: Path | None,
-    protocol_id: str | None,
-    taxonomy_profile_id: str | None,
-    failure_defaults: dict[str, dict[str, Any]],
-    attempt_index: int = 0,
-    attempt_kind: str = "initial",
-    auto_repaired: bool = False,
-    repair_origin_sample_id: str | None = None,
-    repair_history: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    teacher_used = generation_manifest["pipeline_mode"] == "teacher_compress"
-    teacher_status = "not_used"
-    if teacher_used:
-        if teacher_row is None:
-            teacher_status = "missing"
-        elif teacher_row.get("parse_status") == "ok":
-            teacher_status = "completed"
-        else:
-            teacher_status = "parse_failed"
+) -> str | None:
+    requested_profile = os.environ.get("MODEL_PROFILE", "").strip()
+    if requested_profile:
+        return requested_profile
 
-    evaluator_status = "missing"
-    if evaluation_row is not None:
-        parse_status = evaluation_row.get("parse_status", "")
-        if parse_status == "ok":
-            evaluator_status = "completed"
-        elif parse_status == "skipped_no_valid_trajectory":
-            evaluator_status = "skipped"
-        else:
-            evaluator_status = "parse_failed"
-
-    failure_assessment, feedback_decision = resolve_feedback_and_failures(
-        trajectory_row,
-        evaluation_row,
-        teacher_used,
-        protocol_id,
-        taxonomy_profile_id,
-        failure_defaults,
-    )
-    state = review_state(feedback_decision, failure_assessment)
-    failure_ids = [
-        failure_tag.get("failure_id", "")
-        for failure_tag in failure_assessment.get("failure_tags", [])
-        if failure_tag.get("failure_id", "")
-    ]
-    packet = {
-        "schema_version": "sample_packet_v1",
-        "sample_id": f"{config.run_id}::{trajectory_row['scenario_id']}::{trajectory_row['sample_index']:02d}",
-        "scenario_id": trajectory_row["scenario_id"],
-        "sample_index": trajectory_row["sample_index"],
-        "attempt_metadata": {
-            "attempt_index": attempt_index,
-            "attempt_kind": attempt_kind,
-            "auto_repaired": auto_repaired,
-            "repair_origin_sample_id": repair_origin_sample_id,
-        },
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "scenario": scenario_snapshot(scenario),
-        "pipeline": {
-            "run_id": config.run_id,
-            "generation_run_id": config.generator_run_id,
-            "evaluation_run_id": config.evaluator_run_id,
-            "pipeline_mode": generation_manifest["pipeline_mode"],
-            "trajectory_profile": generation_manifest["profile"],
-            "trajectory_schema_version": generation_manifest["schema_version"],
-            "teacher_schema_version": generation_manifest.get("teacher_schema_version"),
-            "feedback_protocol_profile": protocol_id,
-            "failure_taxonomy_profile": taxonomy_profile_id,
-            "evaluation_profile": evaluation_manifest["evaluation_profile"],
-            "evaluation_schema_version": evaluation_manifest["evaluation_schema_version"],
-        },
-        "contracts": {
-            "teacher_agent": {
-                "input_schema_version": "teacher_agent_input_v1" if teacher_used else None,
-                "output_schema_version": generation_manifest.get("teacher_schema_version"),
-                "input_ref": rel_to_root(config, teacher_input_path),
-                "status": teacher_status,
-            },
-            "evaluator_agent": {
-                "input_schema_version": "evaluator_agent_input_v1" if evaluator_input_path else None,
-                "output_schema_version": evaluation_manifest["evaluation_schema_version"],
-                "input_ref": rel_to_root(config, evaluator_input_path),
-                "status": evaluator_status,
-            },
-        },
-        "artifacts": {
-            "teacher_analysis": teacher_row.get("teacher_analysis") if teacher_row else None,
-            "trajectory": trajectory_row.get("trajectory"),
-            "evaluation": evaluation_row.get("evaluation") if evaluation_row else None,
-        },
-        "repair_history": copy.deepcopy(repair_history or []),
-        "failure_assessment": failure_assessment,
-        "feedback_decision": feedback_decision,
-        "summary": {
-            "generation_parse_status": trajectory_row.get("parse_status", ""),
-            "teacher_parse_status": trajectory_row.get("teacher_parse_status")
-            or (teacher_row.get("parse_status", "") if teacher_row else ""),
-            "evaluation_parse_status": evaluation_row.get("parse_status", "") if evaluation_row else "",
-            "teacher_recommended_action_label": trajectory_row.get("teacher_recommended_action_label")
-            or (teacher_row.get("recommended_action_label", "") if teacher_row else ""),
-            "chosen_action_label": trajectory_row.get("chosen_action_label", ""),
-            "overall_verdict": evaluation_row.get("overall_verdict", "") if evaluation_row else "",
-            "rewrite_priority": evaluation_row.get("rewrite_priority", "") if evaluation_row else "",
-            "feedback_rule_id": feedback_decision.get("rule_id"),
-            "feedback_suggested_status": feedback_decision.get("suggested_status"),
-            "feedback_next_action": feedback_decision.get("suggested_next_action"),
-            "primary_failure_id": failure_assessment.get("primary_failure_id"),
-            "highest_failure_severity": failure_assessment.get("highest_severity"),
-            "failure_ids": failure_ids,
-            "axis_scores": evaluation_row.get("axis_scores", {}) if evaluation_row else {},
-        },
-        "quality_signals": {
-            "assistant_contamination_risk": trajectory_row.get("assistant_contamination_risk"),
-            "over_explaining_risk": trajectory_row.get("over_explaining_risk"),
-            "world_model_consistency": trajectory_row.get("world_model_consistency"),
-            "assistant_contamination_detected": evaluation_row.get("assistant_contamination_detected")
-            if evaluation_row
-            else None,
-        },
-        "review_state": state,
-        "provenance": {
-            "generator_model_profile": generation_manifest["model_profile"],
-            "generator_model": trajectory_row.get("model", generation_manifest["model_id"]),
-            "evaluator_model_profile": evaluation_manifest["model_profile"],
-            "evaluator_model": evaluation_row.get("evaluation_model", evaluation_manifest["model_id"])
-            if evaluation_row
-            else evaluation_manifest["model_id"],
-            "generation_usage": trajectory_row.get("usage"),
-            "teacher_usage": trajectory_row.get("teacher_usage"),
-            "evaluation_usage": evaluation_row.get("usage") if evaluation_row else None,
-            "source_refs": {
-                "generation_manifest_ref": rel_to_root(config, generation_manifest_path),
-                "evaluation_manifest_ref": rel_to_root(config, evaluation_manifest_path),
-                "teacher_request_ref": rel_to_root(config, teacher_request_path),
-                "teacher_raw_ref": rel_to_root(config, teacher_raw_path),
-                "trajectory_request_ref": rel_to_root(config, trajectory_request_path),
-                "trajectory_raw_ref": rel_to_root(config, trajectory_raw_path),
-                "evaluation_request_ref": rel_to_root(config, evaluation_request_path),
-                "evaluation_raw_ref": rel_to_root(config, evaluation_raw_path),
-            },
-        },
-    }
-    validate_packet(packet)
-    return packet
+    generation_profile = generation_manifest.get("model_profile", "")
+    evaluation_profile = evaluation_manifest.get("model_profile", "")
+    if generation_profile and generation_profile == evaluation_profile:
+        return generation_profile
+    return None
 
 
 def write_pipeline_manifest(
@@ -1188,65 +821,45 @@ def write_pipeline_manifest(
     auto_repaired_packet_count: int,
     repair_attempt_count: int,
 ) -> None:
+    has_repair_summary = repair_attempt_count > 0
     manifest = {
-        "run_id": config.run_id,
+        "manifest_version": PIPELINE_MANIFEST_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "scenario_ids": scenario_ids,
-        "samples": config.samples,
-        "sample_packet_schema": str(config.sample_packet_schema_path.relative_to(config.root_dir)),
-        "repair_instruction_schema": str(
-            config.repair_instruction_schema_path.relative_to(config.root_dir)
-        ),
-        "teacher_input_schema": str(config.teacher_input_schema_path.relative_to(config.root_dir)),
-        "evaluator_input_schema": str(config.evaluator_input_schema_path.relative_to(config.root_dir)),
-        "generation_manifest_ref": str(
-            (config.run_dir / config.generator_run_id / "manifest.json").relative_to(config.root_dir)
-        ),
-        "evaluation_manifest_ref": str(
-            (config.run_dir / config.evaluator_run_id / "manifest.json").relative_to(config.root_dir)
-        ),
-        "generation": {
-            "run_id": generation_manifest["run_id"],
-            "model_profile": generation_manifest["model_profile"],
-            "model_id": generation_manifest["model_id"],
-            "profile": generation_manifest["profile"],
-            "pipeline_mode": generation_manifest["pipeline_mode"],
+        "run": {
+            "run_id": config.run_id,
+            "scenario_ids": scenario_ids,
+            "scenario_count": len(scenario_ids),
+            "packet_count": packet_count,
+            "sample_packet_schema": rel_to_root(config, config.sample_packet_schema_path),
         },
-        "evaluation": {
-            "run_id": evaluation_manifest["run_id"],
-            "model_profile": evaluation_manifest["model_profile"],
-            "model_id": evaluation_manifest["model_id"],
-            "evaluation_profile": evaluation_manifest["evaluation_profile"],
-            "feedback_protocol_profile": evaluation_manifest.get("feedback_protocol_profile", ""),
-            "feedback_protocol_profile_path": evaluation_manifest.get("feedback_protocol_profile_path", ""),
-            "failure_taxonomy_profile": evaluation_manifest.get("failure_taxonomy_profile", ""),
-            "failure_taxonomy_profile_path": evaluation_manifest.get("failure_taxonomy_profile_path", ""),
-        },
-        "auto_repair": {
-            "enabled": config.auto_repair,
+        "daily_knobs": {
+            "model_profile": resolve_daily_model_profile(generation_manifest, evaluation_manifest),
+            "samples": config.samples,
+            "auto_repair": config.auto_repair,
             "max_repair_attempts": config.max_repair_attempts,
-            "stop_on_no_progress": config.stop_on_no_progress,
-            "min_repair_score_delta": config.min_repair_score_delta,
-            "auto_repaired_packet_count": auto_repaired_packet_count,
-            "repair_attempt_count": repair_attempt_count,
         },
-        "packet_count": packet_count,
-        "output_files": {
-            "sample_packets": str(config.sample_packets_file.relative_to(config.root_dir)),
-            "sample_packet_dir": str(config.packet_dir.relative_to(config.root_dir)),
-            "teacher_inputs": str(config.teacher_input_dir.relative_to(config.root_dir)),
-            "evaluator_inputs": str(config.evaluator_input_dir.relative_to(config.root_dir)),
-            "repair_summary_jsonl": str(config.repair_summary_file.relative_to(config.root_dir))
-            if config.auto_repair
+        "stage_manifests": {
+            "generate": rel_to_root(config, config.run_dir / GENERATOR_STAGE_RUN_ID / "manifest.json"),
+            "evaluate": rel_to_root(config, config.run_dir / EVALUATOR_STAGE_RUN_ID / "manifest.json"),
+        },
+        "daily_artifacts": {
+            "pipeline_summary": rel_to_root(config, config.summary_file),
+            "sample_packets_jsonl": rel_to_root(config, config.sample_packets_file),
+            "sample_packet_dir": rel_to_root(config, config.packet_dir),
+            "repair_summary": rel_to_root(config, config.repair_report_file)
+            if has_repair_summary
             else None,
-            "repair_summary": str(config.repair_report_file.relative_to(config.root_dir))
-            if config.auto_repair
+            "repair_summary_jsonl": rel_to_root(config, config.repair_summary_file)
+            if has_repair_summary
             else None,
-            "summary": str(config.summary_file.relative_to(config.root_dir)),
+        },
+        "repair_overview": {
+            "enabled": config.auto_repair,
+            "repair_attempt_count": repair_attempt_count,
+            "auto_repaired_packet_count": auto_repaired_packet_count,
         },
     }
     write_json(config.manifest_file, manifest)
-
 
 def write_summary(sample_packets_file: Path, summary_file: Path) -> str:
     rows = load_jsonl(sample_packets_file)
@@ -1321,7 +934,7 @@ def main() -> None:
     generator_env = build_generator_env(config)
     print(f"pipeline_run_id={config.run_id}")
     print(f"pipeline_dir={config.run_dir}")
-    print(f"generator_stage={config.generator_run_id} scenarios={scenario_ids} samples={config.samples}")
+    print(f"generator_stage={GENERATOR_STAGE_RUN_ID} scenarios={scenario_ids} samples={config.samples}")
     run_stage(generator_command, generator_env, config.root_dir)
 
     generation_manifest_path, generation_manifest, trajectory_rows, teacher_index = load_generation_stage_outputs(
@@ -1332,7 +945,7 @@ def main() -> None:
 
     evaluator_command = [sys.executable, str(config.evaluator_script), str(trajectories_file)]
     evaluator_env = build_evaluator_env(config)
-    print(f"evaluator_stage={config.evaluator_run_id} trajectory_file={trajectories_file}")
+    print(f"evaluator_stage={EVALUATOR_STAGE_RUN_ID} trajectory_file={trajectories_file}")
     run_stage(evaluator_command, evaluator_env, config.root_dir)
 
     evaluation_manifest_path, evaluation_manifest, _, evaluation_index = load_evaluation_stage_outputs(
@@ -1349,20 +962,9 @@ def main() -> None:
             item["failure_id"]: item for item in failure_taxonomy_profile.get("failures", [])
         }
 
-    teacher_request_dir = None
-    teacher_raw_dir = None
-    if generation_manifest["pipeline_mode"] == "teacher_compress":
-        teacher_request_dir = config.root_dir / generation_manifest["output_files"]["teacher_requests"]
-        teacher_raw_dir = config.root_dir / generation_manifest["output_files"]["teacher_raw"]
-    trajectory_request_dir = config.root_dir / generation_manifest["output_files"]["requests"]
-    trajectory_raw_dir = config.root_dir / generation_manifest["output_files"]["raw"]
-    evaluation_request_dir = config.root_dir / evaluation_manifest["output_files"]["requests"]
-    evaluation_raw_dir = config.root_dir / evaluation_manifest["output_files"]["raw"]
     repair_attempt_count = 0
     auto_repaired_packet_count = 0
-    repair_summary_handle = (
-        config.repair_summary_file.open("a", encoding="utf-8") if config.auto_repair else None
-    )
+    repair_summary_handle = None
 
     try:
         with config.sample_packets_file.open("a", encoding="utf-8") as handle:
@@ -1375,16 +977,30 @@ def main() -> None:
 
                 teacher_input_path = None
                 if generation_manifest["pipeline_mode"] == "teacher_compress":
-                    teacher_input_path = config.teacher_input_dir / f"{row_key}.json"
-                    write_json(teacher_input_path, build_teacher_input(scenario, generation_manifest))
+                    teacher_input_path = materialize_interface_input(
+                        config.teacher_input_dir / f"{row_key}.json",
+                        build_teacher_input(scenario, generation_manifest),
+                        enabled=config.write_interfaces,
+                    )
 
                 evaluator_input_path = None
                 if trajectory_row.get("parse_status") == "ok" and trajectory_row.get("trajectory"):
-                    evaluator_input_path = config.evaluator_input_dir / f"{row_key}.json"
-                    write_json(
-                        evaluator_input_path,
+                    evaluator_input_path = materialize_interface_input(
+                        config.evaluator_input_dir / f"{row_key}.json",
                         build_evaluator_input(scenario, trajectory_row, evaluation_manifest),
+                        enabled=config.write_interfaces,
                     )
+
+                initial_provenance_paths = resolve_provenance_paths(
+                    config,
+                    generation_manifest_path=generation_manifest_path,
+                    generation_manifest=generation_manifest,
+                    evaluation_manifest_path=evaluation_manifest_path,
+                    evaluation_manifest=evaluation_manifest,
+                    row_key=row_key,
+                    teacher_input_path=teacher_input_path,
+                    evaluator_input_path=evaluator_input_path,
+                )
 
                 packet = build_sample_packet(
                     config=config,
@@ -1394,19 +1010,11 @@ def main() -> None:
                     evaluation_row=evaluation_row,
                     generation_manifest=generation_manifest,
                     evaluation_manifest=evaluation_manifest,
-                    generation_manifest_path=generation_manifest_path,
-                    evaluation_manifest_path=evaluation_manifest_path,
-                    teacher_input_path=teacher_input_path,
-                    evaluator_input_path=evaluator_input_path,
-                    teacher_request_path=maybe_path(teacher_request_dir, row_key),
-                    teacher_raw_path=maybe_path(teacher_raw_dir, row_key),
-                    trajectory_request_path=maybe_path(trajectory_request_dir, row_key),
-                    trajectory_raw_path=maybe_path(trajectory_raw_dir, row_key),
-                    evaluation_request_path=maybe_path(evaluation_request_dir, row_key),
-                    evaluation_raw_path=maybe_path(evaluation_raw_dir, row_key),
+                    provenance_paths=initial_provenance_paths,
                     protocol_id=feedback_protocol_id,
                     taxonomy_profile_id=failure_taxonomy_id,
                     failure_defaults=failure_defaults,
+                    attempt_context=AttemptContext(),
                 )
 
                 current_packet = packet
@@ -1421,47 +1029,24 @@ def main() -> None:
                     )
                     repair_attempt_count += 1
 
-                    repair_generation_manifest = repair_result["generation_manifest"]
-                    repair_evaluation_manifest = repair_result["evaluation_manifest"]
-                    repair_trajectory_row = repair_result["trajectory_row"]
-                    repair_teacher_row = repair_result["teacher_row"]
-                    repair_evaluation_row = repair_result["evaluation_row"]
-
-                    repair_teacher_request_dir = None
-                    repair_teacher_raw_dir = None
-                    if repair_generation_manifest["pipeline_mode"] == "teacher_compress":
-                        repair_teacher_request_dir = config.root_dir / repair_generation_manifest["output_files"]["teacher_requests"]
-                        repair_teacher_raw_dir = config.root_dir / repair_generation_manifest["output_files"]["teacher_raw"]
-                    repair_trajectory_request_dir = config.root_dir / repair_generation_manifest["output_files"]["requests"]
-                    repair_trajectory_raw_dir = config.root_dir / repair_generation_manifest["output_files"]["raw"]
-                    repair_evaluation_request_dir = config.root_dir / repair_evaluation_manifest["output_files"]["requests"]
-                    repair_evaluation_raw_dir = config.root_dir / repair_evaluation_manifest["output_files"]["raw"]
-
                     repaired_packet = build_sample_packet(
                         config=config,
                         scenario=scenario,
-                        trajectory_row=repair_trajectory_row,
-                        teacher_row=repair_teacher_row,
-                        evaluation_row=repair_evaluation_row,
-                        generation_manifest=repair_generation_manifest,
-                        evaluation_manifest=repair_evaluation_manifest,
-                        generation_manifest_path=repair_result["generation_manifest_path"],
-                        evaluation_manifest_path=repair_result["evaluation_manifest_path"],
-                        teacher_input_path=repair_result["teacher_input_path"],
-                        evaluator_input_path=repair_result["evaluator_input_path"],
-                        teacher_request_path=maybe_path(repair_teacher_request_dir, row_key),
-                        teacher_raw_path=maybe_path(repair_teacher_raw_dir, row_key),
-                        trajectory_request_path=maybe_path(repair_trajectory_request_dir, row_key),
-                        trajectory_raw_path=maybe_path(repair_trajectory_raw_dir, row_key),
-                        evaluation_request_path=maybe_path(repair_evaluation_request_dir, row_key),
-                        evaluation_raw_path=maybe_path(repair_evaluation_raw_dir, row_key),
+                        trajectory_row=repair_result.trajectory_row,
+                        teacher_row=repair_result.teacher_row,
+                        evaluation_row=repair_result.evaluation_row,
+                        generation_manifest=repair_result.generation_manifest,
+                        evaluation_manifest=repair_result.evaluation_manifest,
+                        provenance_paths=repair_result.provenance_paths,
                         protocol_id=feedback_protocol_id,
                         taxonomy_profile_id=failure_taxonomy_id,
                         failure_defaults=failure_defaults,
-                        attempt_index=next_attempt_index,
-                        attempt_kind="repair",
-                        auto_repaired=True,
-                        repair_origin_sample_id=packet["sample_id"],
+                        attempt_context=AttemptContext(
+                            attempt_index=next_attempt_index,
+                            attempt_kind="repair",
+                            auto_repaired=True,
+                            repair_origin_sample_id=packet["sample_id"],
+                        ),
                         repair_history=repair_history,
                     )
 
@@ -1488,19 +1073,24 @@ def main() -> None:
                     repaired_packet["repair_history"] = copy.deepcopy(repair_history)
                     validate_packet(repaired_packet)
 
-                    if repair_summary_handle is not None:
-                        repair_summary_record = build_repair_summary_record(
-                            config,
-                            current_packet,
-                            repaired_packet,
-                            repair_result,
-                            repair_analysis,
-                            repair_gate,
+                    if repair_summary_handle is None:
+                        repair_summary_handle = config.repair_summary_file.open(
+                            "a",
+                            encoding="utf-8",
                         )
-                        repair_summary_handle.write(
-                            json.dumps(repair_summary_record, ensure_ascii=False) + "\n"
-                        )
-                        repair_summary_handle.flush()
+
+                    repair_summary_record = build_repair_summary_record(
+                        config,
+                        current_packet,
+                        repaired_packet,
+                        repair_result,
+                        repair_analysis,
+                        repair_gate,
+                    )
+                    repair_summary_handle.write(
+                        json.dumps(repair_summary_record, ensure_ascii=False) + "\n"
+                    )
+                    repair_summary_handle.flush()
 
                     current_packet = repaired_packet
                     if not repair_gate["continue_repair"]:
@@ -1528,7 +1118,7 @@ def main() -> None:
     )
     summary_text = write_summary(config.sample_packets_file, config.summary_file)
     print(summary_text, end="")
-    if config.auto_repair:
+    if repair_attempt_count > 0:
         repair_summary_text = write_repair_summary(
             config.repair_summary_file,
             config.repair_report_file,
