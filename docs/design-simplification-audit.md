@@ -18,6 +18,22 @@
 
 当前最值得做的，不是继续扩 repair 或 dataset engineering，而是收缩 orchestrator 周边的控制面。
 
+### 1.1 当前阶段的稳定性边界
+
+当前阶段需要区分两类东西：
+
+- 稳定核心 contract：`sample_packet_v1`、generation -> evaluation -> packet join 的核心闭环、以及 repair routing / repair gate 的基本语义。
+- 可演化 UX surface：`pipeline_manifest.json` 的形状、`WRITE_INTERFACES` 这类输出策略、以及“空 repair 是否物化 summary”这类默认落盘行为。
+
+当前对第二类的判断标准，不是“是否已经冻结成长期接口”，而是：
+
+- 方向是否更清楚。
+- daily path 与 trace path 是否更分层。
+- 文档、默认行为和用户心智模型是否更一致。
+- 是否减少了“看起来像错误、其实只是没发生”的噪声。
+
+因此，manifest、interfaces 开关和空 repair summary 在这一阶段可以继续演化；只要方向合理，就不必为了维持旧形状而强行保守。
+
 优先级判断如下：
 
 1. 保持 `sample_packet_v1` 作为当前 canonical sample unit，不先动核心资产格式。

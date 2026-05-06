@@ -32,6 +32,11 @@ subagent 负责：
 - 说明实际改动、验证动作和剩余风险。
 - 不擅自扩展 sprint 范围。
 
+补充判断：
+
+- 对 `sample_packet_v1`、核心 routing / repair 语义这类稳定 contract，优先保守处理。
+- 对 manifest 形状、interfaces 输出策略、空 repair summary 这类 UX surface，优先看演化方向是否合理，不必为了维持旧形状而做过度回归约束。
+
 ## 3. 每轮 subagent briefing 的最小组成
 
 建议每次都明确给出：
@@ -98,3 +103,8 @@ subagent 负责：
 3. 只有在主代理明确要求时，才做真实 DeepSeek live smoke。
 
 这样能避免子代理在重构阶段过早消耗 API 并把问题混入外部随机性。
+
+但在 UX surface 相关切片中，还应额外遵循一条：
+
+- 不要把“旧形状是否完全保留”当成最高目标。
+- 更重要的是新形状是否让 daily / expert、daily / trace 边界更清楚，且没有制造文档与行为的不一致。

@@ -16,6 +16,13 @@
 
 `sample_packet_v1` 是当前仓库的 canonical sample unit。
 
+需要特别说明的是：当前仓库里并不是所有运行产物都和 `sample_packet_v1` 处于同一稳定等级。
+
+- `sample_packet_v1` 本身，以及围绕它的 repair / review 核心语义，应当视为当前阶段的稳定 contract。
+- `pipeline_manifest.json` 的形状、teacher / evaluator input 是否默认落盘、空 repair 是否物化 `repair_summary.*`，则更接近运行体验层的 UX / ops surface。
+
+后者在当前快速演化阶段允许继续调整，只要方向是在减少噪声、强化 daily path 与 trace path 的分层，而不是破坏 sample packet 主体语义。
+
 它包含 12 个稳定块：
 
 - `scenario`：场景快照，保证样本可脱离原始 scenario 文件单独理解。

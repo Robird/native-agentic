@@ -11,6 +11,14 @@
 
 这个 sprint 可以调整文档、manifest 和默认输出策略，但不应破坏当前 canonical sample unit。
 
+当前要明确把下面这些对象视为可演化 UX surface，而不是冻结接口：
+
+- `pipeline_manifest.json` 的形状
+- `interfaces/` 的默认写出策略
+- 空 repair 时 `repair_summary.*` 的物化策略
+
+因此，这个 sprint 的判断标准首先是“方向是否更合理”，而不是“旧形状是否原封不动保留”。
+
 ## 2. 背景依据
 
 先读：
@@ -127,6 +135,11 @@
 3. 日常用户不再被大量 trace 输出默认吸引注意力。
 4. `sample_packet_v1` 与当前 repair 语义保持稳定。
 
+补充说明：
+
+- 本 sprint 不要求 manifest、interfaces 开关或空 repair summary 的旧形状被严格保留。
+- 只要新的默认行为更少噪声、更符合 daily-first 的方向，并且文档与行为对齐，就应视为正向演化。
+
 ## 8. 验证建议
 
 优先做：
@@ -136,6 +149,12 @@
 3. 用现有结果目录做局部检查，确认 manifest / summary 形状符合新约定。
 
 除非主代理明确要求，否则不要默认跑真实 DeepSeek live smoke。
+
+同时不要把“保持旧形状”当成验证目标本身；这里更重要的是：
+
+- 新形状是否更符合 daily-first 的索引心智模型。
+- 新的默认行为是否减少误导性输出。
+- 文档说明是否与实际物化行为一致。
 
 ## 9. subagent 回传要求
 
