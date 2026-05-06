@@ -4,6 +4,7 @@
 
 当前内容：
 
+- 日常使用入口：见 `docs/quick-start.md`。
 - `scripts/run_experiment.py`：Python 版实验器，负责构造请求、调用 API、解析响应和聚合结果。
 - `scripts/run_experiment.sh`：兼容入口，转发到 Python 版实验器。
 - `scripts/generate_state_trajectories.py`：DeepSeek 绑定的状态轨迹语料生成器，现已支持单阶段和“两阶段教师压缩”管线。
@@ -22,10 +23,13 @@
 - `schemas/trajectory_evaluation_v1.json`：轨迹评估结果的第一版 schema。
 - `docs/vision.md`：当前愿景与关键发现。
 - `docs/evaluation-principles.md`：评价标准的第一版方法论框架。
+- `docs/quick-start.md`：面向日常使用者的 quick start / user guide。
 - `docs/sample-packet-and-agent-interfaces.md`：sample packet 与 teacher/evaluator 正式接口说明。
 - `docs/research/custom-agent-alignment-observations.md`：四个 custom agent 默认三观/角色塑造的研究备忘。
 - `docs/roadmap.md`：阶段性路线图。
 - `results/`：每次运行的请求、原始响应和聚合结果会落到这里。
+
+如果你是第一次上手或只是想跑日常 workflow，优先看 `docs/quick-start.md`；README 更偏总览和参考手册。
 
 快速开始：
 
