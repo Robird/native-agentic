@@ -88,7 +88,8 @@
 
 - 已完成 `failure_taxonomy_v1` 与 `feedback_protocol_v1`。
 - 已完成 `repair_instruction_v1`，并把 `revise_prompt_local` / `regenerate_from_teacher` 接进 `scripts/run_sample_pipeline.py` 的单轮自动修复闭环。
-- 下一步不再是“能不能修”，而是“是否值得继续多轮修、何时该停、何时交给人工或数据集策略”。
+- 已进一步接入 progress-gated 的有界多轮修复，以及 `repair_summary.jsonl` / `repair_summary.txt` 级别的 delta 记录。
+- 下一步不再是“能不能修”，而是“何种 progress signal 最值得信、何时该停、何时交给人工或数据集策略”。
 
 ### 4. 研究型后续计划：咨询 custom agents 的默认三观与角色塑造
 

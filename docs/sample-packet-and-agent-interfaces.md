@@ -100,12 +100,12 @@ evaluator agent 不负责：
 2. 物化 teacher/evaluator 的正式输入文件。
 3. 调用现有评估脚本，落出 evaluation 产物。
 4. 把这些产物 join 成 `sample_packet_v1`，并用 `feedback_decision` 落最终 `review_state`。
-5. 当 `AUTO_REPAIR=1` 且 next action 命中可执行分支时，生成 `repair_instruction_v1` 并执行一轮受控重跑。
+5. 当 `AUTO_REPAIR=1` 且 next action 命中可执行分支时，生成 `repair_instruction_v1` 并执行 progress-gated 的有界 repair loop。
 
 当前它还不负责：
 
 - 无界自动修订 loop
-- 多轮 regenerate / revise 策略搜索
+- 复杂的多轮 regenerate / revise 策略搜索
 - 复杂调度策略
 - 数据集去重和版本裁剪
 
@@ -114,6 +114,8 @@ evaluator agent 不负责：
 - `revise_prompt_local`：orchestrator 生成 `repair_instruction_v1`，并在 `teacher_compress` 管线下复用上一轮 `teacher_analysis`，只重跑压缩/轨迹层。
 - `regenerate_from_teacher`：orchestrator 生成 `repair_instruction_v1`，从 teacher 阶段重新推导，再继续压缩与评估。
 - 两条分支都会把 `attempt_metadata` 和 `repair_history` 写回最终 sample packet。
+- orchestrator 会为每轮 repair 生成独立的 delta record，并把它写入 `repair_summary.jsonl`；stop policy 与后续分析共享同一份 delta，而不是各算各的。
+- 当前默认 stop gate 是：若 repair 后已经 approved，或下一步不再可自动修；否则只有在 primary failure 变化、verdict 改善、或平均轴分提升时才继续下一轮。
 
 ## 7. Review State Mapping V1
 
@@ -128,7 +130,7 @@ evaluator agent 不负责：
 - `reject -> rejected / reject`
 - `schema / structure failure -> manual_review / rerun_generation` 或手工兜底
 
-如果 evaluator 输出缺失或结构不可靠，orchestrator 才会退回 fallback 规则。也就是说，现在闭环已经不只是表达“接下来该怎么处理这条样本”，而是能在 `AUTO_REPAIR=1` 时真正执行一轮 `revise_prompt_local` 或 `regenerate_from_teacher`。
+如果 evaluator 输出缺失或结构不可靠，orchestrator 才会退回 fallback 规则。也就是说，现在闭环已经不只是表达“接下来该怎么处理这条样本”，而是能在 `AUTO_REPAIR=1` 时真正执行 progress-gated 的 `revise_prompt_local` / `regenerate_from_teacher` 自动修复。
 
 ## 8. Why This Matters
 

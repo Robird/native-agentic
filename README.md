@@ -131,7 +131,8 @@ MODEL_PROFILE=debug SAMPLES=1 AUTO_REPAIR=1 MAX_REPAIR_ATTEMPTS=1 python3 script
 2. 物化 teacher/evaluator 的正式输入 contract 文件。
 3. 调用评估脚本，产出 constitutional evaluation。
 4. 把这些产物 join 成 `sample_packet_v1`。
-5. 当 `AUTO_REPAIR=1` 且路由命中 `revise_prompt_local` 或 `regenerate_from_teacher` 时，自动执行一轮受控重跑，并把 `attempt_metadata` / `repair_history` 写回最终 packet。
+5. 当 `AUTO_REPAIR=1` 且路由命中 `revise_prompt_local` 或 `regenerate_from_teacher` 时，自动执行有界 repair loop：每轮先记录 repair delta，再只在 primary failure 变化、verdict 改善、或平均轴分提升时继续下一轮。
+6. 把 `attempt_metadata` / `repair_history` 写回最终 packet，并额外输出 `repair_summary.jsonl` / `repair_summary.txt` 供后续策略分析。
 
 样本一体化管线额外使用以下环境变量：
 
@@ -145,6 +146,8 @@ MODEL_PROFILE=debug SAMPLES=1 AUTO_REPAIR=1 MAX_REPAIR_ATTEMPTS=1 python3 script
 - `EVALUATOR_INPUT_SCHEMA_FILE`：默认 `schemas/evaluator_agent_input_v1.json`。
 - `AUTO_REPAIR`：默认 `0`。设为 `1` 时，允许 orchestrator 自动执行一轮修复重跑。
 - `MAX_REPAIR_ATTEMPTS`：默认 `1`。限制每条样本最多自动修复几轮。
+- `STOP_ON_NO_PROGRESS`：默认 `1`。设为 `1` 时，若 repair 后 primary failure 不变、verdict 无改善且平均轴分未提升，则停止继续修复。
+- `MIN_REPAIR_SCORE_DELTA`：默认 `1.0`。判定“平均轴分有提升”所需的最小增量。
 
 输出说明：
 
@@ -181,6 +184,8 @@ MODEL_PROFILE=debug SAMPLES=1 AUTO_REPAIR=1 MAX_REPAIR_ATTEMPTS=1 python3 script
 - `results/<run_id>/sample_packets/*.json`：逐条样本包。
 - `results/<run_id>/sample_packets.jsonl`：聚合后的样本包 JSONL。
 - `results/<run_id>/repair_attempts/.../attempt_XX/`：自动修复启用时，每轮 repair 的指令、重跑产物与接口文件。
+- `results/<run_id>/repair_summary.jsonl`：每轮 repair 的前后 delta、progress signal 和 stop reason。
+- `results/<run_id>/repair_summary.txt`：repair action / stop reason / progress signal 的聚合摘要。
 - `results/<run_id>/pipeline_summary.txt`：整体 review_state / next_action / verdict / primary_failure 摘要。
 - `results/<run_id>/pipeline_manifest.json`：一体化管线清单。
 

@@ -25,6 +25,20 @@ DEFAULT_TRAJECTORY_PROFILE = "analysis_teacher_compress_v1"
 DEFAULT_TRAJECTORY_PIPELINE = "teacher_compress"
 DEFAULT_SAMPLES = 3
 DEFAULT_MAX_REPAIR_ATTEMPTS = 1
+DEFAULT_MIN_REPAIR_SCORE_DELTA = 1.0
+
+EXECUTABLE_REPAIR_ACTIONS = {
+    "revise_prompt_local",
+    "regenerate_from_teacher",
+}
+
+VERDICT_ORDER = {
+    "": 0,
+    "reject": 0,
+    "manual_review": 1,
+    "revise": 2,
+    "keep": 3,
+}
 
 
 @dataclass(frozen=True)
@@ -39,6 +53,8 @@ class Config:
     teacher_input_dir: Path
     evaluator_input_dir: Path
     sample_packets_file: Path
+    repair_summary_file: Path
+    repair_report_file: Path
     summary_file: Path
     manifest_file: Path
     sample_packet_schema_path: Path
@@ -52,6 +68,8 @@ class Config:
     samples: int
     auto_repair: bool
     max_repair_attempts: int
+    stop_on_no_progress: bool
+    min_repair_score_delta: float
     trajectory_profile: str
     trajectory_pipeline: str
     evaluation_profile_file: str
@@ -92,6 +110,8 @@ def load_config() -> Config:
         teacher_input_dir=run_dir / "interfaces" / "teacher_inputs",
         evaluator_input_dir=run_dir / "interfaces" / "evaluator_inputs",
         sample_packets_file=run_dir / "sample_packets.jsonl",
+        repair_summary_file=run_dir / "repair_summary.jsonl",
+        repair_report_file=run_dir / "repair_summary.txt",
         summary_file=run_dir / "pipeline_summary.txt",
         manifest_file=run_dir / "pipeline_manifest.json",
         sample_packet_schema_path=root_dir
@@ -110,6 +130,10 @@ def load_config() -> Config:
         auto_repair=env_flag("AUTO_REPAIR", False),
         max_repair_attempts=int(
             os.environ.get("MAX_REPAIR_ATTEMPTS", str(DEFAULT_MAX_REPAIR_ATTEMPTS))
+        ),
+        stop_on_no_progress=env_flag("STOP_ON_NO_PROGRESS", True),
+        min_repair_score_delta=float(
+            os.environ.get("MIN_REPAIR_SCORE_DELTA", str(DEFAULT_MIN_REPAIR_SCORE_DELTA))
         ),
         trajectory_profile=os.environ.get("TRAJECTORY_PROFILE", DEFAULT_TRAJECTORY_PROFILE),
         trajectory_pipeline=os.environ.get("TRAJECTORY_PIPELINE", DEFAULT_TRAJECTORY_PIPELINE),
@@ -143,6 +167,8 @@ def validate_config(config: Config) -> None:
             raise SystemExit(f"Required file not found: {path}")
     if config.max_repair_attempts < 0:
         raise SystemExit("MAX_REPAIR_ATTEMPTS must be a non-negative integer.")
+    if config.min_repair_score_delta < 0:
+        raise SystemExit("MIN_REPAIR_SCORE_DELTA must be a non-negative float.")
     if config.run_dir.exists():
         raise SystemExit(f"Pipeline run directory already exists: {config.run_dir}")
 
@@ -169,6 +195,7 @@ def ensure_output_dirs(config: Config) -> None:
     config.evaluator_input_dir.mkdir(parents=True, exist_ok=False)
     if config.auto_repair:
         config.repairs_dir.mkdir(parents=True, exist_ok=False)
+        config.repair_summary_file.write_text("", encoding="utf-8")
     config.sample_packets_file.write_text("", encoding="utf-8")
 
 
@@ -318,15 +345,191 @@ def snapshot_review_state(review_state: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def average_axis_scores(axis_scores: dict[str, Any]) -> float | None:
+    numeric_scores = [score for score in axis_scores.values() if isinstance(score, int)]
+    if not numeric_scores:
+        return None
+    return sum(numeric_scores) / len(numeric_scores)
+
+
+def packet_axis_average(packet: dict[str, Any]) -> float | None:
+    return average_axis_scores(packet.get("summary", {}).get("axis_scores", {}))
+
+
+def verdict_rank(verdict: str) -> int:
+    return VERDICT_ORDER.get(verdict, 0)
+
+
+def build_repair_analysis(
+    config: Config,
+    source_packet: dict[str, Any],
+    result_packet: dict[str, Any],
+    repair_result: dict[str, Any],
+) -> dict[str, Any]:
+    source_verdict = source_packet["summary"].get("overall_verdict", "")
+    result_verdict = result_packet["summary"].get("overall_verdict", "")
+    source_primary_failure = source_packet["summary"].get("primary_failure_id") or "none"
+    result_primary_failure = result_packet["summary"].get("primary_failure_id") or "none"
+    source_axis_average = packet_axis_average(source_packet)
+    result_axis_average = packet_axis_average(result_packet)
+
+    axis_average_delta = None
+    score_improved = False
+    if source_axis_average is None and result_axis_average is not None:
+        axis_average_delta = result_axis_average
+        score_improved = True
+    elif source_axis_average is not None and result_axis_average is not None:
+        axis_average_delta = result_axis_average - source_axis_average
+        score_improved = axis_average_delta >= config.min_repair_score_delta
+
+    approved_after_repair = result_packet["review_state"]["status"] == "approved"
+    primary_failure_changed = source_primary_failure != result_primary_failure
+    verdict_improved = verdict_rank(result_verdict) > verdict_rank(source_verdict)
+    result_is_repairable = result_packet["review_state"]["next_action"] in EXECUTABLE_REPAIR_ACTIONS
+
+    progress_signals = {
+        "approved_after_repair": approved_after_repair,
+        "primary_failure_changed": primary_failure_changed,
+        "score_improved": score_improved,
+        "verdict_improved": verdict_improved,
+    }
+
+    return {
+        "attempt_index": result_packet["attempt_metadata"]["attempt_index"],
+        "sample_id": result_packet["sample_id"],
+        "repair_action": repair_result["instruction"]["next_action"],
+        "repair_target": repair_result["instruction"]["repair_target"],
+        "source_overall_verdict": source_verdict,
+        "result_overall_verdict": result_verdict,
+        "source_primary_failure": source_primary_failure,
+        "result_primary_failure": result_primary_failure,
+        "source_axis_average": source_axis_average,
+        "result_axis_average": result_axis_average,
+        "axis_average_delta": axis_average_delta,
+        "progress_signals": progress_signals,
+        "made_progress": any(progress_signals.values()),
+        "result_is_repairable": result_is_repairable,
+    }
+
+
+def evaluate_repair_gate(
+    config: Config,
+    result_packet: dict[str, Any],
+    repair_analysis: dict[str, Any],
+) -> dict[str, Any]:
+    if repair_analysis["progress_signals"]["approved_after_repair"]:
+        return {
+            "continue_repair": False,
+            "stop_reason": "approved",
+        }
+    if not repair_analysis["result_is_repairable"]:
+        return {
+            "continue_repair": False,
+            "stop_reason": "non_repairable_route",
+        }
+    if result_packet["attempt_metadata"]["attempt_index"] >= config.max_repair_attempts:
+        return {
+            "continue_repair": False,
+            "stop_reason": "max_attempts_reached",
+        }
+    if config.stop_on_no_progress and not repair_analysis["made_progress"]:
+        return {
+            "continue_repair": False,
+            "stop_reason": "no_progress",
+        }
+    return {
+        "continue_repair": True,
+        "stop_reason": None,
+    }
+
+
+def build_repair_summary_record(
+    config: Config,
+    source_packet: dict[str, Any],
+    result_packet: dict[str, Any],
+    repair_result: dict[str, Any],
+    repair_analysis: dict[str, Any],
+    repair_gate: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "pipeline_run_id": config.run_id,
+        "sample_id": result_packet["sample_id"],
+        "scenario_id": result_packet["scenario_id"],
+        "sample_index": result_packet["sample_index"],
+        "attempt_index": result_packet["attempt_metadata"]["attempt_index"],
+        "repair_action": repair_analysis["repair_action"],
+        "repair_target": repair_analysis["repair_target"],
+        "reused_teacher_analysis": repair_result["reused_teacher_analysis"],
+        "source_review_state": snapshot_review_state(source_packet["review_state"]),
+        "result_review_state": snapshot_review_state(result_packet["review_state"]),
+        "source_overall_verdict": repair_analysis["source_overall_verdict"],
+        "result_overall_verdict": repair_analysis["result_overall_verdict"],
+        "source_primary_failure": repair_analysis["source_primary_failure"],
+        "result_primary_failure": repair_analysis["result_primary_failure"],
+        "source_axis_average": repair_analysis["source_axis_average"],
+        "result_axis_average": repair_analysis["result_axis_average"],
+        "axis_average_delta": repair_analysis["axis_average_delta"],
+        "progress_signals": repair_analysis["progress_signals"],
+        "made_progress": repair_analysis["made_progress"],
+        "continue_repair": repair_gate["continue_repair"],
+        "stop_reason": repair_gate["stop_reason"],
+        "instruction_ref": rel_to_root(config, repair_result["instruction_path"]),
+        "generation_manifest_ref": rel_to_root(config, repair_result["generation_manifest_path"]),
+        "evaluation_manifest_ref": rel_to_root(config, repair_result["evaluation_manifest_path"]),
+    }
+
+
+def write_repair_summary(repair_summary_file: Path, repair_report_file: Path) -> str:
+    rows = load_jsonl(repair_summary_file)
+    lines = [f"records={len(rows)}"]
+
+    action_counts: collections.Counter[str] = collections.Counter()
+    stop_reason_counts: collections.Counter[str] = collections.Counter()
+    continue_counts: collections.Counter[bool] = collections.Counter()
+    progress_signal_counts: collections.Counter[str] = collections.Counter()
+    by_scenario: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
+    axis_average_deltas: list[float] = []
+
+    for row in rows:
+        action_counts[row.get("repair_action") or "<empty>"] += 1
+        stop_reason_counts[row.get("stop_reason") or "<empty>"] += 1
+        continue_counts[row.get("continue_repair", False)] += 1
+        by_scenario[row["scenario_id"]].append(row)
+        for signal_name, signal_value in (row.get("progress_signals") or {}).items():
+            if signal_value is True:
+                progress_signal_counts[signal_name] += 1
+        axis_average_delta = row.get("axis_average_delta")
+        if isinstance(axis_average_delta, (int, float)):
+            axis_average_deltas.append(float(axis_average_delta))
+
+    lines.append(f"repair_action={dict(sorted(action_counts.items()))}")
+    lines.append(f"stop_reason={dict(sorted(stop_reason_counts.items()))}")
+    lines.append(f"continue_repair={dict(sorted(continue_counts.items()))}")
+    lines.append(f"progress_signals={dict(sorted(progress_signal_counts.items()))}")
+    if axis_average_deltas:
+        average_delta = sum(axis_average_deltas) / len(axis_average_deltas)
+        lines.append(f"avg_axis_average_delta={average_delta:.2f}")
+
+    for scenario_id in sorted(by_scenario):
+        subset = by_scenario[scenario_id]
+        scenario_stop_reasons: collections.Counter[str] = collections.Counter()
+        for row in subset:
+            scenario_stop_reasons[row.get("stop_reason") or "<empty>"] += 1
+        lines.append("")
+        lines.append(f"[{scenario_id}] repairs={len(subset)}")
+        lines.append(f"stop_reason={dict(sorted(scenario_stop_reasons.items()))}")
+
+    summary_text = "\n".join(lines) + "\n"
+    repair_report_file.write_text(summary_text, encoding="utf-8")
+    return summary_text
+
+
 def should_auto_repair(config: Config, packet: dict[str, Any]) -> bool:
     if not config.auto_repair:
         return False
     if packet["attempt_metadata"]["attempt_index"] >= config.max_repair_attempts:
         return False
-    return packet["review_state"]["next_action"] in {
-        "revise_prompt_local",
-        "regenerate_from_teacher",
-    }
+    return packet["review_state"]["next_action"] in EXECUTABLE_REPAIR_ACTIONS
 
 
 def build_repair_instruction(packet: dict[str, Any]) -> dict[str, Any]:
@@ -1022,6 +1225,8 @@ def write_pipeline_manifest(
         "auto_repair": {
             "enabled": config.auto_repair,
             "max_repair_attempts": config.max_repair_attempts,
+            "stop_on_no_progress": config.stop_on_no_progress,
+            "min_repair_score_delta": config.min_repair_score_delta,
             "auto_repaired_packet_count": auto_repaired_packet_count,
             "repair_attempt_count": repair_attempt_count,
         },
@@ -1031,6 +1236,12 @@ def write_pipeline_manifest(
             "sample_packet_dir": str(config.packet_dir.relative_to(config.root_dir)),
             "teacher_inputs": str(config.teacher_input_dir.relative_to(config.root_dir)),
             "evaluator_inputs": str(config.evaluator_input_dir.relative_to(config.root_dir)),
+            "repair_summary_jsonl": str(config.repair_summary_file.relative_to(config.root_dir))
+            if config.auto_repair
+            else None,
+            "repair_summary": str(config.repair_report_file.relative_to(config.root_dir))
+            if config.auto_repair
+            else None,
             "summary": str(config.summary_file.relative_to(config.root_dir)),
         },
     }
@@ -1149,125 +1360,162 @@ def main() -> None:
     evaluation_raw_dir = config.root_dir / evaluation_manifest["output_files"]["raw"]
     repair_attempt_count = 0
     auto_repaired_packet_count = 0
+    repair_summary_handle = (
+        config.repair_summary_file.open("a", encoding="utf-8") if config.auto_repair else None
+    )
 
-    with config.sample_packets_file.open("a", encoding="utf-8") as handle:
-        for trajectory_row in trajectory_rows:
-            key = (trajectory_row["scenario_id"], trajectory_row["sample_index"])
-            scenario = scenarios_by_id[trajectory_row["scenario_id"]]
-            row_key = sample_key(trajectory_row["scenario_id"], trajectory_row["sample_index"])
-            teacher_row = teacher_index.get(key)
-            evaluation_row = evaluation_index.get(key)
+    try:
+        with config.sample_packets_file.open("a", encoding="utf-8") as handle:
+            for trajectory_row in trajectory_rows:
+                key = (trajectory_row["scenario_id"], trajectory_row["sample_index"])
+                scenario = scenarios_by_id[trajectory_row["scenario_id"]]
+                row_key = sample_key(trajectory_row["scenario_id"], trajectory_row["sample_index"])
+                teacher_row = teacher_index.get(key)
+                evaluation_row = evaluation_index.get(key)
 
-            teacher_input_path = None
-            if generation_manifest["pipeline_mode"] == "teacher_compress":
-                teacher_input_path = config.teacher_input_dir / f"{row_key}.json"
-                write_json(teacher_input_path, build_teacher_input(scenario, generation_manifest))
+                teacher_input_path = None
+                if generation_manifest["pipeline_mode"] == "teacher_compress":
+                    teacher_input_path = config.teacher_input_dir / f"{row_key}.json"
+                    write_json(teacher_input_path, build_teacher_input(scenario, generation_manifest))
 
-            evaluator_input_path = None
-            if trajectory_row.get("parse_status") == "ok" and trajectory_row.get("trajectory"):
-                evaluator_input_path = config.evaluator_input_dir / f"{row_key}.json"
-                write_json(
-                    evaluator_input_path,
-                    build_evaluator_input(scenario, trajectory_row, evaluation_manifest),
-                )
+                evaluator_input_path = None
+                if trajectory_row.get("parse_status") == "ok" and trajectory_row.get("trajectory"):
+                    evaluator_input_path = config.evaluator_input_dir / f"{row_key}.json"
+                    write_json(
+                        evaluator_input_path,
+                        build_evaluator_input(scenario, trajectory_row, evaluation_manifest),
+                    )
 
-            packet = build_sample_packet(
-                config=config,
-                scenario=scenario,
-                trajectory_row=trajectory_row,
-                teacher_row=teacher_row,
-                evaluation_row=evaluation_row,
-                generation_manifest=generation_manifest,
-                evaluation_manifest=evaluation_manifest,
-                generation_manifest_path=generation_manifest_path,
-                evaluation_manifest_path=evaluation_manifest_path,
-                teacher_input_path=teacher_input_path,
-                evaluator_input_path=evaluator_input_path,
-                teacher_request_path=maybe_path(teacher_request_dir, row_key),
-                teacher_raw_path=maybe_path(teacher_raw_dir, row_key),
-                trajectory_request_path=maybe_path(trajectory_request_dir, row_key),
-                trajectory_raw_path=maybe_path(trajectory_raw_dir, row_key),
-                evaluation_request_path=maybe_path(evaluation_request_dir, row_key),
-                evaluation_raw_path=maybe_path(evaluation_raw_dir, row_key),
-                protocol_id=feedback_protocol_id,
-                taxonomy_profile_id=failure_taxonomy_id,
-                failure_defaults=failure_defaults,
-            )
-
-            current_packet = packet
-            repair_history: list[dict[str, Any]] = []
-            while should_auto_repair(config, current_packet):
-                next_attempt_index = current_packet["attempt_metadata"]["attempt_index"] + 1
-                repair_result = execute_repair_attempt(
-                    config,
-                    scenario,
-                    current_packet,
-                    next_attempt_index,
-                )
-                repair_attempt_count += 1
-
-                repair_generation_manifest = repair_result["generation_manifest"]
-                repair_evaluation_manifest = repair_result["evaluation_manifest"]
-                repair_trajectory_row = repair_result["trajectory_row"]
-                repair_teacher_row = repair_result["teacher_row"]
-                repair_evaluation_row = repair_result["evaluation_row"]
-
-                repair_teacher_request_dir = None
-                repair_teacher_raw_dir = None
-                if repair_generation_manifest["pipeline_mode"] == "teacher_compress":
-                    repair_teacher_request_dir = config.root_dir / repair_generation_manifest["output_files"]["teacher_requests"]
-                    repair_teacher_raw_dir = config.root_dir / repair_generation_manifest["output_files"]["teacher_raw"]
-                repair_trajectory_request_dir = config.root_dir / repair_generation_manifest["output_files"]["requests"]
-                repair_trajectory_raw_dir = config.root_dir / repair_generation_manifest["output_files"]["raw"]
-                repair_evaluation_request_dir = config.root_dir / repair_evaluation_manifest["output_files"]["requests"]
-                repair_evaluation_raw_dir = config.root_dir / repair_evaluation_manifest["output_files"]["raw"]
-
-                repaired_packet = build_sample_packet(
+                packet = build_sample_packet(
                     config=config,
                     scenario=scenario,
-                    trajectory_row=repair_trajectory_row,
-                    teacher_row=repair_teacher_row,
-                    evaluation_row=repair_evaluation_row,
-                    generation_manifest=repair_generation_manifest,
-                    evaluation_manifest=repair_evaluation_manifest,
-                    generation_manifest_path=repair_result["generation_manifest_path"],
-                    evaluation_manifest_path=repair_result["evaluation_manifest_path"],
-                    teacher_input_path=repair_result["teacher_input_path"],
-                    evaluator_input_path=repair_result["evaluator_input_path"],
-                    teacher_request_path=maybe_path(repair_teacher_request_dir, row_key),
-                    teacher_raw_path=maybe_path(repair_teacher_raw_dir, row_key),
-                    trajectory_request_path=maybe_path(repair_trajectory_request_dir, row_key),
-                    trajectory_raw_path=maybe_path(repair_trajectory_raw_dir, row_key),
-                    evaluation_request_path=maybe_path(repair_evaluation_request_dir, row_key),
-                    evaluation_raw_path=maybe_path(repair_evaluation_raw_dir, row_key),
+                    trajectory_row=trajectory_row,
+                    teacher_row=teacher_row,
+                    evaluation_row=evaluation_row,
+                    generation_manifest=generation_manifest,
+                    evaluation_manifest=evaluation_manifest,
+                    generation_manifest_path=generation_manifest_path,
+                    evaluation_manifest_path=evaluation_manifest_path,
+                    teacher_input_path=teacher_input_path,
+                    evaluator_input_path=evaluator_input_path,
+                    teacher_request_path=maybe_path(teacher_request_dir, row_key),
+                    teacher_raw_path=maybe_path(teacher_raw_dir, row_key),
+                    trajectory_request_path=maybe_path(trajectory_request_dir, row_key),
+                    trajectory_raw_path=maybe_path(trajectory_raw_dir, row_key),
+                    evaluation_request_path=maybe_path(evaluation_request_dir, row_key),
+                    evaluation_raw_path=maybe_path(evaluation_raw_dir, row_key),
                     protocol_id=feedback_protocol_id,
                     taxonomy_profile_id=failure_taxonomy_id,
                     failure_defaults=failure_defaults,
-                    attempt_index=next_attempt_index,
-                    attempt_kind="repair",
-                    auto_repaired=True,
-                    repair_origin_sample_id=packet["sample_id"],
-                    repair_history=repair_history,
                 )
-                repair_history.append(
-                    build_repair_history_entry(
+
+                current_packet = packet
+                repair_history: list[dict[str, Any]] = []
+                while should_auto_repair(config, current_packet):
+                    next_attempt_index = current_packet["attempt_metadata"]["attempt_index"] + 1
+                    repair_result = execute_repair_attempt(
+                        config,
+                        scenario,
+                        current_packet,
+                        next_attempt_index,
+                    )
+                    repair_attempt_count += 1
+
+                    repair_generation_manifest = repair_result["generation_manifest"]
+                    repair_evaluation_manifest = repair_result["evaluation_manifest"]
+                    repair_trajectory_row = repair_result["trajectory_row"]
+                    repair_teacher_row = repair_result["teacher_row"]
+                    repair_evaluation_row = repair_result["evaluation_row"]
+
+                    repair_teacher_request_dir = None
+                    repair_teacher_raw_dir = None
+                    if repair_generation_manifest["pipeline_mode"] == "teacher_compress":
+                        repair_teacher_request_dir = config.root_dir / repair_generation_manifest["output_files"]["teacher_requests"]
+                        repair_teacher_raw_dir = config.root_dir / repair_generation_manifest["output_files"]["teacher_raw"]
+                    repair_trajectory_request_dir = config.root_dir / repair_generation_manifest["output_files"]["requests"]
+                    repair_trajectory_raw_dir = config.root_dir / repair_generation_manifest["output_files"]["raw"]
+                    repair_evaluation_request_dir = config.root_dir / repair_evaluation_manifest["output_files"]["requests"]
+                    repair_evaluation_raw_dir = config.root_dir / repair_evaluation_manifest["output_files"]["raw"]
+
+                    repaired_packet = build_sample_packet(
+                        config=config,
+                        scenario=scenario,
+                        trajectory_row=repair_trajectory_row,
+                        teacher_row=repair_teacher_row,
+                        evaluation_row=repair_evaluation_row,
+                        generation_manifest=repair_generation_manifest,
+                        evaluation_manifest=repair_evaluation_manifest,
+                        generation_manifest_path=repair_result["generation_manifest_path"],
+                        evaluation_manifest_path=repair_result["evaluation_manifest_path"],
+                        teacher_input_path=repair_result["teacher_input_path"],
+                        evaluator_input_path=repair_result["evaluator_input_path"],
+                        teacher_request_path=maybe_path(repair_teacher_request_dir, row_key),
+                        teacher_raw_path=maybe_path(repair_teacher_raw_dir, row_key),
+                        trajectory_request_path=maybe_path(repair_trajectory_request_dir, row_key),
+                        trajectory_raw_path=maybe_path(repair_trajectory_raw_dir, row_key),
+                        evaluation_request_path=maybe_path(repair_evaluation_request_dir, row_key),
+                        evaluation_raw_path=maybe_path(repair_evaluation_raw_dir, row_key),
+                        protocol_id=feedback_protocol_id,
+                        taxonomy_profile_id=failure_taxonomy_id,
+                        failure_defaults=failure_defaults,
+                        attempt_index=next_attempt_index,
+                        attempt_kind="repair",
+                        auto_repaired=True,
+                        repair_origin_sample_id=packet["sample_id"],
+                        repair_history=repair_history,
+                    )
+
+                    repair_analysis = build_repair_analysis(
                         config,
                         current_packet,
                         repaired_packet,
                         repair_result,
                     )
-                )
-                repaired_packet["repair_history"] = copy.deepcopy(repair_history)
-                validate_packet(repaired_packet)
-                current_packet = repaired_packet
+                    repair_gate = evaluate_repair_gate(
+                        config,
+                        repaired_packet,
+                        repair_analysis,
+                    )
 
-            if current_packet["attempt_metadata"]["attempt_index"] > 0:
-                auto_repaired_packet_count += 1
+                    repair_history.append(
+                        build_repair_history_entry(
+                            config,
+                            current_packet,
+                            repaired_packet,
+                            repair_result,
+                        )
+                    )
+                    repaired_packet["repair_history"] = copy.deepcopy(repair_history)
+                    validate_packet(repaired_packet)
 
-            packet_path = config.packet_dir / f"{row_key}.json"
-            write_json(packet_path, current_packet)
-            handle.write(json.dumps(current_packet, ensure_ascii=False) + "\n")
-            handle.flush()
+                    if repair_summary_handle is not None:
+                        repair_summary_record = build_repair_summary_record(
+                            config,
+                            current_packet,
+                            repaired_packet,
+                            repair_result,
+                            repair_analysis,
+                            repair_gate,
+                        )
+                        repair_summary_handle.write(
+                            json.dumps(repair_summary_record, ensure_ascii=False) + "\n"
+                        )
+                        repair_summary_handle.flush()
+
+                    current_packet = repaired_packet
+                    if not repair_gate["continue_repair"]:
+                        break
+
+                if current_packet["attempt_metadata"]["attempt_index"] > 0:
+                    auto_repaired_packet_count += 1
+
+                packet_path = config.packet_dir / f"{row_key}.json"
+                write_json(packet_path, current_packet)
+                handle.write(json.dumps(current_packet, ensure_ascii=False) + "\n")
+                handle.flush()
+    finally:
+        if repair_summary_handle is not None:
+            repair_summary_handle.close()
 
     write_pipeline_manifest(
         config,
@@ -1280,6 +1528,12 @@ def main() -> None:
     )
     summary_text = write_summary(config.sample_packets_file, config.summary_file)
     print(summary_text, end="")
+    if config.auto_repair:
+        repair_summary_text = write_repair_summary(
+            config.repair_summary_file,
+            config.repair_report_file,
+        )
+        print(repair_summary_text, end="")
     print(f"sample_packets={config.sample_packets_file}")
     print(f"pipeline_manifest={config.manifest_file}")
 
