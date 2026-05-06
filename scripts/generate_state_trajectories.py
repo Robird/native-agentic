@@ -5,6 +5,7 @@ import collections
 import copy
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -407,6 +408,34 @@ def post_chat_completion(config: Config, payload: dict[str, Any]) -> dict[str, A
     return json.loads(body)
 
 
+def repair_common_tool_json(arguments_text: str) -> str:
+    repaired = arguments_text.strip()
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+    repaired = re.sub(
+        r',\s*"immediate"\s*:\s*\[[\s\S]*?\]\s*}\s*,\s*"inferred_latents"',
+        ', "inferred_latents"',
+        repaired,
+    )
+    return repaired
+
+
+def load_tool_arguments(arguments_text: str) -> dict[str, Any]:
+    try:
+        return json.loads(arguments_text)
+    except json.JSONDecodeError:
+        repaired = repair_common_tool_json(arguments_text)
+        if repaired != arguments_text:
+            return json.loads(repaired)
+        raise
+
+
+def normalize_world_model_consistency(payload: dict[str, Any]) -> None:
+    quality_control = payload.get("quality_control") or {}
+    consistency = quality_control.get("world_model_consistency")
+    if isinstance(consistency, str) and consistency.isdigit():
+        quality_control["world_model_consistency"] = int(consistency)
+
+
 def parse_trajectory_record(
     schema_template: dict[str, Any],
     scenario_id: str,
@@ -443,12 +472,13 @@ def parse_trajectory_record(
 
     arguments_text = tool_calls[0].get("function", {}).get("arguments", "{}")
     try:
-        trajectory = json.loads(arguments_text)
+        trajectory = load_tool_arguments(arguments_text)
     except json.JSONDecodeError:
         record["parse_status"] = "bad_tool_json"
         record["raw_arguments"] = arguments_text
         return record
 
+    normalize_world_model_consistency(trajectory)
     quality_control = trajectory.get("quality_control", {})
     chosen_action = trajectory.get("chosen_action", {})
 
@@ -500,12 +530,13 @@ def parse_teacher_analysis_record(
 
     arguments_text = tool_calls[0].get("function", {}).get("arguments", "{}")
     try:
-        teacher_analysis = json.loads(arguments_text)
+        teacher_analysis = load_tool_arguments(arguments_text)
     except json.JSONDecodeError:
         record["parse_status"] = "bad_tool_json"
         record["raw_arguments"] = arguments_text
         return record
 
+    normalize_world_model_consistency(teacher_analysis)
     quality_control = teacher_analysis.get("quality_control", {})
     recommended_packet = teacher_analysis.get("recommended_packet", {})
     record.update(

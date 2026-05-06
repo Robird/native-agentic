@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Evaluator Agent Input V1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "evaluator_agent_input_v1"
+    },
+    "evaluation_profile": {
+      "type": "string"
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "situation": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "action_options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "label",
+              "description"
+            ]
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "profile",
+        "situation",
+        "task",
+        "action_options"
+      ]
+    },
+    "trajectory_meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sample_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "trajectory_profile": {
+          "type": "string"
+        },
+        "pipeline_mode": {
+          "type": "string"
+        },
+        "trajectory_schema_version": {
+          "type": "string",
+          "const": "state_trajectory_v1"
+        }
+      },
+      "required": [
+        "sample_index",
+        "trajectory_profile",
+        "pipeline_mode",
+        "trajectory_schema_version"
+      ]
+    },
+    "trajectory": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "evaluation_profile",
+    "scenario",
+    "trajectory_meta",
+    "trajectory"
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Teacher Agent Input V1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "teacher_agent_input_v1"
+    },
+    "scenario_id": {
+      "type": "string"
+    },
+    "role_name": {
+      "type": "string"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "situation": {
+      "type": "string"
+    },
+    "task": {
+      "type": "string"
+    },
+    "action_options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "description"
+        ]
+      }
+    },
+    "generation_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "trajectory_profile": {
+          "type": "string"
+        },
+        "pipeline_mode": {
+          "type": "string",
+          "enum": [
+            "single_stage",
+            "teacher_compress"
+          ]
+        },
+        "teacher_output_schema": {
+          "type": "string",
+          "const": "teacher_analysis_v1"
+        },
+        "trajectory_output_schema": {
+          "type": "string",
+          "const": "state_trajectory_v1"
+        }
+      },
+      "required": [
+        "trajectory_profile",
+        "pipeline_mode",
+        "teacher_output_schema",
+        "trajectory_output_schema"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "role_name",
+    "profile",
+    "situation",
+    "task",
+    "action_options",
+    "generation_context"
+  ]
+}

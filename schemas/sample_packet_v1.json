@@ -1,0 +1,452 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sample Packet V1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "sample_packet_v1"
+    },
+    "sample_id": {
+      "type": "string"
+    },
+    "scenario_id": {
+      "type": "string"
+    },
+    "sample_index": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "scenario": {
+      "$ref": "#/definitions/scenarioSnapshot"
+    },
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "generation_run_id": {
+          "type": "string"
+        },
+        "evaluation_run_id": {
+          "type": "string"
+        },
+        "pipeline_mode": {
+          "type": "string"
+        },
+        "trajectory_profile": {
+          "type": "string"
+        },
+        "trajectory_schema_version": {
+          "type": "string"
+        },
+        "teacher_schema_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evaluation_profile": {
+          "type": "string"
+        },
+        "evaluation_schema_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "generation_run_id",
+        "evaluation_run_id",
+        "pipeline_mode",
+        "trajectory_profile",
+        "trajectory_schema_version",
+        "teacher_schema_version",
+        "evaluation_profile",
+        "evaluation_schema_version"
+      ]
+    },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "teacher_agent": {
+          "$ref": "#/definitions/agentContract"
+        },
+        "evaluator_agent": {
+          "$ref": "#/definitions/agentContract"
+        }
+      },
+      "required": [
+        "teacher_agent",
+        "evaluator_agent"
+      ]
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "teacher_analysis": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "trajectory": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "evaluation": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "teacher_analysis",
+        "trajectory",
+        "evaluation"
+      ]
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation_parse_status": {
+          "type": "string"
+        },
+        "teacher_parse_status": {
+          "type": "string"
+        },
+        "evaluation_parse_status": {
+          "type": "string"
+        },
+        "teacher_recommended_action_label": {
+          "type": "string"
+        },
+        "chosen_action_label": {
+          "type": "string"
+        },
+        "overall_verdict": {
+          "type": "string"
+        },
+        "rewrite_priority": {
+          "type": "string"
+        },
+        "axis_scores": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "required": [
+        "generation_parse_status",
+        "teacher_parse_status",
+        "evaluation_parse_status",
+        "teacher_recommended_action_label",
+        "chosen_action_label",
+        "overall_verdict",
+        "rewrite_priority",
+        "axis_scores"
+      ]
+    },
+    "quality_signals": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "assistant_contamination_risk": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "over_explaining_risk": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "world_model_consistency": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "assistant_contamination_detected": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "assistant_contamination_risk",
+        "over_explaining_risk",
+        "world_model_consistency",
+        "assistant_contamination_detected"
+      ]
+    },
+    "review_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "approved",
+            "needs_revision",
+            "manual_review",
+            "rejected"
+          ]
+        },
+        "next_action": {
+          "type": "string",
+          "enum": [
+            "approve",
+            "revise_prompt_local",
+            "regenerate_from_teacher",
+            "manual_review",
+            "reject",
+            "rerun_generation"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "next_action",
+        "reason"
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generator_model_profile": {
+          "type": "string"
+        },
+        "generator_model": {
+          "type": "string"
+        },
+        "evaluator_model_profile": {
+          "type": "string"
+        },
+        "evaluator_model": {
+          "type": "string"
+        },
+        "generation_usage": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "teacher_usage": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "evaluation_usage": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "source_refs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "generation_manifest_ref": {
+              "type": "string"
+            },
+            "evaluation_manifest_ref": {
+              "type": "string"
+            },
+            "teacher_request_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "teacher_raw_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "trajectory_request_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "trajectory_raw_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evaluation_request_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evaluation_raw_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "generation_manifest_ref",
+            "evaluation_manifest_ref",
+            "teacher_request_ref",
+            "teacher_raw_ref",
+            "trajectory_request_ref",
+            "trajectory_raw_ref",
+            "evaluation_request_ref",
+            "evaluation_raw_ref"
+          ]
+        }
+      },
+      "required": [
+        "generator_model_profile",
+        "generator_model",
+        "evaluator_model_profile",
+        "evaluator_model",
+        "generation_usage",
+        "teacher_usage",
+        "evaluation_usage",
+        "source_refs"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "sample_id",
+    "scenario_id",
+    "sample_index",
+    "created_at",
+    "scenario",
+    "pipeline",
+    "contracts",
+    "artifacts",
+    "summary",
+    "quality_signals",
+    "review_state",
+    "provenance"
+  ],
+  "definitions": {
+    "actionOption": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "description"
+      ]
+    },
+    "scenarioSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "situation": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "action_options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/actionOption"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "profile",
+        "situation",
+        "task",
+        "action_options"
+      ]
+    },
+    "agentContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input_schema_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_schema_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "completed",
+            "parse_failed",
+            "skipped",
+            "not_used",
+            "missing"
+          ]
+        }
+      },
+      "required": [
+        "input_schema_version",
+        "output_schema_version",
+        "input_ref",
+        "status"
+      ]
+    }
+  }
+}

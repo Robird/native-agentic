@@ -8,13 +8,18 @@
 - `scripts/run_experiment.sh`：兼容入口，转发到 Python 版实验器。
 - `scripts/generate_state_trajectories.py`：DeepSeek 绑定的状态轨迹语料生成器，现已支持单阶段和“两阶段教师压缩”管线。
 - `scripts/evaluate_trajectories.py`：按“工作宪法”对轨迹进行结构化评估的脚本。
+- `scripts/run_sample_pipeline.py`：最小生成-评估一体化 orchestrator，把单条样本落成 `sample_packet_v1`。
 - `data/scenarios/*.json`：两个手写第三人称数据点。
 - `profiles/evaluation_profile_constitutional_v1.json`：第一版可扩展评估 profile。
+- `schemas/sample_packet_v1.json`：样本资产单位的第一版 schema。
 - `schemas/state_trajectory_v1.json`：状态轨迹语料的第一版机器可读 schema。
+- `schemas/teacher_agent_input_v1.json`：teacher agent 正式输入 contract。
 - `schemas/teacher_analysis_v1.json`：分析教师中间稿的第一版 schema。
+- `schemas/evaluator_agent_input_v1.json`：evaluator agent 正式输入 contract。
 - `schemas/trajectory_evaluation_v1.json`：轨迹评估结果的第一版 schema。
 - `docs/vision.md`：当前愿景与关键发现。
 - `docs/evaluation-principles.md`：评价标准的第一版方法论框架。
+- `docs/sample-packet-and-agent-interfaces.md`：sample packet 与 teacher/evaluator 正式接口说明。
 - `docs/research/custom-agent-alignment-observations.md`：四个 custom agent 默认三观/角色塑造的研究备忘。
 - `docs/roadmap.md`：阶段性路线图。
 - `results/`：每次运行的请求、原始响应和聚合结果会落到这里。
@@ -103,6 +108,30 @@ MODEL_PROFILE=debug python3 scripts/evaluate_trajectories.py results/teacher-com
 - `EVALUATION_PROFILE_FILE`：默认 `profiles/evaluation_profile_constitutional_v1.json`。
 - `RUN_ID`：手动指定结果目录名。
 
+样本一体化管线：
+
+```bash
+cd /repos/mental-model
+MODEL_PROFILE=debug SAMPLES=1 python3 scripts/run_sample_pipeline.py guard_unwinnable_001
+```
+
+这个脚本会：
+
+1. 调用生成脚本，产出 teacher analysis 和 trajectory。
+2. 物化 teacher/evaluator 的正式输入 contract 文件。
+3. 调用评估脚本，产出 constitutional evaluation。
+4. 把这些产物 join 成 `sample_packet_v1`。
+
+样本一体化管线额外使用以下环境变量：
+
+- `GENERATOR_MODEL_PROFILE` / `GENERATOR_MODEL_ID`：只覆盖生成阶段模型选择。
+- `EVALUATOR_MODEL_PROFILE` / `EVALUATOR_MODEL_ID`：只覆盖评估阶段模型选择。
+- `GENERATOR_TEMPERATURE`：只覆盖生成阶段温度。
+- `EVALUATOR_TEMPERATURE`：只覆盖评估阶段温度。
+- `SAMPLE_PACKET_SCHEMA_FILE`：默认 `schemas/sample_packet_v1.json`。
+- `TEACHER_INPUT_SCHEMA_FILE`：默认 `schemas/teacher_agent_input_v1.json`。
+- `EVALUATOR_INPUT_SCHEMA_FILE`：默认 `schemas/evaluator_agent_input_v1.json`。
+
 输出说明：
 
 - `results/<run_id>/requests/*.json`：每次请求体，方便复现实验。
@@ -128,6 +157,17 @@ MODEL_PROFILE=debug python3 scripts/evaluate_trajectories.py results/teacher-com
 - `results/<run_id>/evaluations.jsonl`：按工作宪法打标后的结构化评估结果。
 - `results/<run_id>/evaluation_summary.txt`：总体 verdict、rewrite priority 和各判断轴平均分摘要。
 - `results/<run_id>/manifest.json`：本次评估运行清单。
+
+样本一体化管线输出：
+
+- `results/<run_id>/generate/`：生成阶段全部产物。
+- `results/<run_id>/evaluate/`：评估阶段全部产物。
+- `results/<run_id>/interfaces/teacher_inputs/*.json`：teacher agent 正式输入文件。
+- `results/<run_id>/interfaces/evaluator_inputs/*.json`：evaluator agent 正式输入文件。
+- `results/<run_id>/sample_packets/*.json`：逐条样本包。
+- `results/<run_id>/sample_packets.jsonl`：聚合后的样本包 JSONL。
+- `results/<run_id>/pipeline_summary.txt`：整体 review_state / next_action / verdict 摘要。
+- `results/<run_id>/pipeline_manifest.json`：一体化管线清单。
 
 设计要点：
 

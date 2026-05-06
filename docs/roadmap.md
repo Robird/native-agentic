@@ -52,6 +52,12 @@
 
 ## 当前下一步计划
 
+已完成的承接动作：
+
+- `sample_packet_v1` 已落地，样本资产单位不再只是裸 trajectory。
+- teacher/evaluator 的正式输入 contract 已落地成独立 schema。
+- 最小 orchestrator 已实现为 `scripts/run_sample_pipeline.py`，并已用真实 API 打通单样本闭环。
+
 ### 1. 先把工作宪法落成结构化评估层
 
 - 把 8 条判断轴翻译成可执行的 evaluation rubric，而不是停留在理念文档。
@@ -64,11 +70,19 @@
 - 不把“生成能力”和“评价宪法”混成一个 prompt。
 - 让后续多 agent 管线可以稳定串接。
 
+当前状态：第一版接口已落地，但还缺“评估结果如何驱动后续动作”的正式反馈协议。
+
 ### 3. 再回到高价值样板的逐条打磨
 
 - 先做人机协作的小批量样板，而不是直接全自动扩量。
 - 每条样板都标注主要考察哪几条判断轴、常见失败方式是什么。
 - 逐步从样板中提炼扩写规则和评估规则。
+
+### 3.5 当前最合理的下一目标：反馈协议与失败分类
+
+- 把 `keep / revise / manual_review / reject` 进一步翻译成稳定的后续动作协议。
+- 明确什么时候走 `revise_prompt_local`，什么时候走 `regenerate_from_teacher`，什么时候直接 `reject`。
+- 引入统一 failure taxonomy，让样本不只是“分高低”，而是能被分桶和回流处理。
 
 ### 4. 研究型后续计划：咨询 custom agents 的默认三观与角色塑造
 
