@@ -11,6 +11,9 @@
 - `scripts/run_sample_pipeline.py`：最小生成-评估一体化 orchestrator，把单条样本落成 `sample_packet_v1`。
 - `data/scenarios/*.json`：两个手写第三人称数据点。
 - `profiles/evaluation_profile_constitutional_v1.json`：第一版可扩展评估 profile。
+- `profiles/failure_taxonomy_v1.json`：第一版 failure taxonomy profile。
+- `profiles/feedback_protocol_v1.json`：第一版 feedback protocol profile。
+- `schemas/repair_instruction_v1.json`：orchestrator 发给生成器的定向修复指令 contract。
 - `schemas/sample_packet_v1.json`：样本资产单位的第一版 schema。
 - `schemas/state_trajectory_v1.json`：状态轨迹语料的第一版机器可读 schema。
 - `schemas/teacher_agent_input_v1.json`：teacher agent 正式输入 contract。
@@ -115,12 +118,20 @@ cd /repos/mental-model
 MODEL_PROFILE=debug SAMPLES=1 python3 scripts/run_sample_pipeline.py guard_unwinnable_001
 ```
 
+如需让 orchestrator 按 `feedback_decision` 自动执行一轮定向修复：
+
+```bash
+cd /repos/mental-model
+MODEL_PROFILE=debug SAMPLES=1 AUTO_REPAIR=1 MAX_REPAIR_ATTEMPTS=1 python3 scripts/run_sample_pipeline.py guard_unwinnable_001
+```
+
 这个脚本会：
 
 1. 调用生成脚本，产出 teacher analysis 和 trajectory。
 2. 物化 teacher/evaluator 的正式输入 contract 文件。
 3. 调用评估脚本，产出 constitutional evaluation。
 4. 把这些产物 join 成 `sample_packet_v1`。
+5. 当 `AUTO_REPAIR=1` 且路由命中 `revise_prompt_local` 或 `regenerate_from_teacher` 时，自动执行一轮受控重跑，并把 `attempt_metadata` / `repair_history` 写回最终 packet。
 
 样本一体化管线额外使用以下环境变量：
 
@@ -129,8 +140,11 @@ MODEL_PROFILE=debug SAMPLES=1 python3 scripts/run_sample_pipeline.py guard_unwin
 - `GENERATOR_TEMPERATURE`：只覆盖生成阶段温度。
 - `EVALUATOR_TEMPERATURE`：只覆盖评估阶段温度。
 - `SAMPLE_PACKET_SCHEMA_FILE`：默认 `schemas/sample_packet_v1.json`。
+- `REPAIR_INSTRUCTION_SCHEMA_FILE`：默认 `schemas/repair_instruction_v1.json`。
 - `TEACHER_INPUT_SCHEMA_FILE`：默认 `schemas/teacher_agent_input_v1.json`。
 - `EVALUATOR_INPUT_SCHEMA_FILE`：默认 `schemas/evaluator_agent_input_v1.json`。
+- `AUTO_REPAIR`：默认 `0`。设为 `1` 时，允许 orchestrator 自动执行一轮修复重跑。
+- `MAX_REPAIR_ATTEMPTS`：默认 `1`。限制每条样本最多自动修复几轮。
 
 输出说明：
 
@@ -155,7 +169,7 @@ MODEL_PROFILE=debug SAMPLES=1 python3 scripts/run_sample_pipeline.py guard_unwin
 - `results/<run_id>/evaluation_requests/*.json`：每次评估请求体。
 - `results/<run_id>/evaluation_raw/*.json`：每次评估 API 原始响应。
 - `results/<run_id>/evaluations.jsonl`：按工作宪法打标后的结构化评估结果。
-- `results/<run_id>/evaluation_summary.txt`：总体 verdict、rewrite priority 和各判断轴平均分摘要。
+- `results/<run_id>/evaluation_summary.txt`：总体 verdict、rewrite priority、feedback next action、primary failure 和各判断轴平均分摘要。
 - `results/<run_id>/manifest.json`：本次评估运行清单。
 
 样本一体化管线输出：
@@ -166,8 +180,16 @@ MODEL_PROFILE=debug SAMPLES=1 python3 scripts/run_sample_pipeline.py guard_unwin
 - `results/<run_id>/interfaces/evaluator_inputs/*.json`：evaluator agent 正式输入文件。
 - `results/<run_id>/sample_packets/*.json`：逐条样本包。
 - `results/<run_id>/sample_packets.jsonl`：聚合后的样本包 JSONL。
-- `results/<run_id>/pipeline_summary.txt`：整体 review_state / next_action / verdict 摘要。
+- `results/<run_id>/repair_attempts/.../attempt_XX/`：自动修复启用时，每轮 repair 的指令、重跑产物与接口文件。
+- `results/<run_id>/pipeline_summary.txt`：整体 review_state / next_action / verdict / primary_failure 摘要。
 - `results/<run_id>/pipeline_manifest.json`：一体化管线清单。
+
+新的 evaluator 输出现在除了 axis_results 之外，还包含两块正式结构：
+
+- `failure_assessment`：按 `failure_taxonomy_v1` 打上的 failure tags、主 failure 和严重度。
+- `feedback_decision`：按 `feedback_protocol_v1` 生成的建议状态、建议下一步动作和修复阶段。
+
+`sample_packet_v1` 会把这两块结构保留下来，并据此生成最终的 `review_state`。现在 packet 还会记录 `attempt_metadata` 和 `repair_history`，因此样本不再只是“好/坏”，而是已经具备了可路由、可追踪的下一步动作语义。
 
 设计要点：
 

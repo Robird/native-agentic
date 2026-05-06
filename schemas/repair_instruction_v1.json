@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Repair Instruction V1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "repair_instruction_v1"
+    },
+    "sample_id": {
+      "type": "string"
+    },
+    "scenario_id": {
+      "type": "string"
+    },
+    "sample_index": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source_attempt_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "next_action": {
+      "type": "string",
+      "enum": [
+        "revise_prompt_local",
+        "regenerate_from_teacher"
+      ]
+    },
+    "repair_target": {
+      "type": "string",
+      "enum": [
+        "trajectory_prompt",
+        "teacher_stage"
+      ]
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "overall_verdict": {
+          "type": "string"
+        },
+        "rewrite_priority": {
+          "type": "string"
+        },
+        "feedback_rule_id": {
+          "type": "string"
+        },
+        "primary_failure_id": {
+          "type": "string"
+        },
+        "highest_failure_severity": {
+          "type": "string"
+        },
+        "failure_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "overall_verdict",
+        "rewrite_priority",
+        "feedback_rule_id",
+        "primary_failure_id",
+        "highest_failure_severity",
+        "failure_ids"
+      ]
+    },
+    "repair_focus": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "preserve": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "chosen_action_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strengths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "must_keep": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "chosen_action_label",
+        "strengths",
+        "must_keep"
+      ]
+    },
+    "rationale": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "sample_id",
+    "scenario_id",
+    "sample_index",
+    "source_attempt_index",
+    "next_action",
+    "repair_target",
+    "trigger",
+    "repair_focus",
+    "preserve",
+    "rationale"
+  ]
+}

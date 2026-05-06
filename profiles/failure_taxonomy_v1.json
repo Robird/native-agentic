@@ -1,0 +1,150 @@
+{
+  "profile_id": "failure_taxonomy_v1",
+  "display_name": "Failure Taxonomy V1",
+  "summary": "Classify trajectory defects by repair stage and severity so samples can be routed, not just scored.",
+  "failures": [
+    {
+      "failure_id": "assistant_contamination",
+      "label": "Assistant contamination",
+      "category": "alignment",
+      "description": "The trajectory slips into assistant, answerer, explainer or user-serving protocol language instead of staying inside the acting subject worldview.",
+      "signals": [
+        "出现'作为助手'或'为了帮助用户'之类外部协议语言",
+        "明显在回答提问者，而不是继续角色状态"
+      ],
+      "default_severity": "high",
+      "preferred_repair_stage": "trajectory_prompt",
+      "default_next_action": "revise_prompt_local"
+    },
+    {
+      "failure_id": "world_model_inconsistency",
+      "label": "World model inconsistency",
+      "category": "world_model",
+      "description": "The trajectory contradicts visible facts, timing, capability limits, or causal structure in the scene.",
+      "signals": [
+        "时间、距离、资源或能力判断彼此冲突",
+        "chosen_action 依赖场景里并不存在的条件"
+      ],
+      "default_severity": "high",
+      "preferred_repair_stage": "teacher_stage",
+      "default_next_action": "regenerate_from_teacher"
+    },
+    {
+      "failure_id": "relationship_frame_blur",
+      "label": "Relationship frame blur",
+      "category": "relational",
+      "description": "The trajectory weakens or confuses key relation boundaries, responsibilities, or role distinctions.",
+      "signals": [
+        "监护人/保护对象/敌对方/监管者关系混淆",
+        "责任结构缺失或边界判断漂移"
+      ],
+      "default_severity": "high",
+      "preferred_repair_stage": "teacher_stage",
+      "default_next_action": "regenerate_from_teacher"
+    },
+    {
+      "failure_id": "goal_horizon_missing",
+      "label": "Goal horizon missing",
+      "category": "planning",
+      "description": "The sample under-represents long-term or mid-term goals and collapses into only immediate reaction.",
+      "signals": [
+        "只有眼前动作，没有长期或中期目标锚点",
+        "chosen_action 与长期承诺/关系责任脱节"
+      ],
+      "default_severity": "high",
+      "preferred_repair_stage": "teacher_stage",
+      "default_next_action": "regenerate_from_teacher"
+    },
+    {
+      "failure_id": "guardian_or_law_gap",
+      "label": "Guardian or law gap",
+      "category": "guardianship",
+      "description": "The sample misses guardianship structure, escalation path, legal boundary, or accountability reasoning that the scene calls for.",
+      "signals": [
+        "需要升级或监护介入却没有明确表达",
+        "责任归属和法律边界完全缺席"
+      ],
+      "default_severity": "medium",
+      "preferred_repair_stage": "teacher_stage",
+      "default_next_action": "regenerate_from_teacher"
+    },
+    {
+      "failure_id": "action_selection_mismatch",
+      "label": "Action selection mismatch",
+      "category": "action",
+      "description": "The chosen action does not fit the character anchor, scene constraints, or the candidate trade-offs presented.",
+      "signals": [
+        "chosen_action 与前文 candidate_actions / recalled_memory 不一致",
+        "最优动作看起来像模板答案，而非当前角色最可能动作"
+      ],
+      "default_severity": "high",
+      "preferred_repair_stage": "teacher_stage",
+      "default_next_action": "regenerate_from_teacher"
+    },
+    {
+      "failure_id": "candidate_set_weak",
+      "label": "Candidate set weak",
+      "category": "action_set",
+      "description": "Candidate actions are too fake, too shallow, or fail to represent meaningful trade-offs.",
+      "signals": [
+        "候选动作是明显稻草人或无真实权衡",
+        "动作集过窄，无法支撑 chosen_action 的选择意义"
+      ],
+      "default_severity": "medium",
+      "preferred_repair_stage": "teacher_stage",
+      "default_next_action": "regenerate_from_teacher"
+    },
+    {
+      "failure_id": "state_update_gap",
+      "label": "State update gap",
+      "category": "state_management",
+      "description": "The sample fails to write necessary MemoryNotebook, GoalTree, SelfState, or WorldModel updates.",
+      "signals": [
+        "state_updates 基本空转，没把关键增量写进去",
+        "chosen_action 已发生，但内部工具更新明显缺位"
+      ],
+      "default_severity": "medium",
+      "preferred_repair_stage": "trajectory_prompt",
+      "default_next_action": "revise_prompt_local"
+    },
+    {
+      "failure_id": "compression_overexplained",
+      "label": "Compression overexplained",
+      "category": "compression",
+      "description": "The final trajectory is too essay-like, too verbose, or too close to teacher prose instead of sparse training data.",
+      "signals": [
+        "轨迹保留了过多论文腔/说理腔/长句解释",
+        "压缩阶段看起来只是复制教师稿"
+      ],
+      "default_severity": "medium",
+      "preferred_repair_stage": "trajectory_prompt",
+      "default_next_action": "revise_prompt_local"
+    },
+    {
+      "failure_id": "low_value_or_redundant",
+      "label": "Low value or redundant",
+      "category": "dataset_value",
+      "description": "The sample is too generic, too redundant, or too low-signal to justify keeping in the curated corpus.",
+      "signals": [
+        "内容过于套路化，对训练贡献有限",
+        "与已有高质量样本相比几乎没有新增信息"
+      ],
+      "default_severity": "medium",
+      "preferred_repair_stage": "dataset_policy",
+      "default_next_action": "reject"
+    },
+    {
+      "failure_id": "schema_structure_instability",
+      "label": "Schema structure instability",
+      "category": "structure",
+      "description": "The structured output is malformed, internally unstable, or not trustworthy enough for automated routing.",
+      "signals": [
+        "tool JSON 破损、嵌套错位或字段缺失",
+        "虽然勉强可读，但结构上不适合作为自动化样本资产"
+      ],
+      "default_severity": "critical",
+      "preferred_repair_stage": "generation_rerun",
+      "default_next_action": "rerun_generation"
+    }
+  ]
+}

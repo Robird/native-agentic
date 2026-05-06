@@ -22,6 +22,13 @@ MODEL_PROFILE_TO_ID = {
     "debug": "deepseek-v4-flash",
     "release": "deepseek-v4-pro",
 }
+SEVERITY_ORDER = {
+    "none": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
 
 
 @dataclass(frozen=True)
@@ -122,6 +129,218 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_linked_profile(root_dir: Path, reference: dict[str, Any]) -> dict[str, Any]:
+    hydrated = copy.deepcopy(reference)
+    path_text = hydrated.get("path", "")
+    if not path_text:
+        hydrated["content"] = {}
+        return hydrated
+    path = root_dir / path_text
+    if not path.is_file():
+        raise SystemExit(f"Linked profile not found: {path}")
+    hydrated["content"] = load_json(path)
+    return hydrated
+
+
+def hydrate_evaluation_profile(root_dir: Path, evaluation_profile: dict[str, Any]) -> dict[str, Any]:
+    hydrated = copy.deepcopy(evaluation_profile)
+    for key in ["failure_taxonomy_profile", "feedback_protocol_profile"]:
+        if key in hydrated:
+            hydrated[key] = load_linked_profile(root_dir, hydrated[key])
+    return hydrated
+
+
+def format_failure_taxonomy_block(failure_taxonomy: dict[str, Any]) -> str:
+    if not failure_taxonomy:
+        return "- 无 failure taxonomy profile。"
+
+    lines = [f"profile_id: {failure_taxonomy['profile_id']}"]
+    for failure in failure_taxonomy.get("failures", []):
+        lines.append(
+            f"- {failure['failure_id']} / {failure['label']} ({failure['category']}): {failure['description']} "
+            f"[severity={failure['default_severity']} repair={failure['preferred_repair_stage']} next={failure['default_next_action']}]"
+        )
+    return "\n".join(lines)
+
+
+def format_feedback_protocol_block(feedback_protocol: dict[str, Any]) -> str:
+    if not feedback_protocol:
+        return "- 无 feedback protocol profile。"
+
+    lines = [f"profile_id: {feedback_protocol['profile_id']}"]
+    for rule in feedback_protocol.get("decision_rules", []):
+        lines.append(
+            f"- {rule['rule_id']}: {rule['trigger']} -> {rule['suggested_status']} / {rule['suggested_next_action']} / {rule['preferred_repair_stage']}"
+        )
+    return "\n".join(lines)
+
+
+def infer_repair_stage(next_action: str, fallback_stage: str = "manual") -> str:
+    mapping = {
+        "approve": "none",
+        "revise_prompt_local": "trajectory_prompt",
+        "regenerate_from_teacher": "teacher_stage",
+        "manual_review": "manual",
+        "reject": "dataset_policy",
+        "rerun_generation": "generation_rerun",
+    }
+    return mapping.get(next_action, fallback_stage)
+
+
+def infer_urgency(rewrite_priority: str, next_action: str) -> str:
+    if rewrite_priority == "high" or next_action in {"reject", "rerun_generation", "manual_review"}:
+        return "high"
+    if rewrite_priority == "medium" or next_action in {
+        "revise_prompt_local",
+        "regenerate_from_teacher",
+    }:
+        return "medium"
+    return "low"
+
+
+def normalize_failure_assessment(
+    evaluation_profile: dict[str, Any],
+    evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    taxonomy = (evaluation_profile.get("failure_taxonomy_profile") or {}).get("content") or {}
+    taxonomy_profile_id = taxonomy.get("profile_id", "")
+    failure_defaults = {
+        item["failure_id"]: item for item in taxonomy.get("failures", [])
+    }
+    failure_assessment = copy.deepcopy(evaluation.get("failure_assessment") or {})
+    raw_failure_tags = failure_assessment.get("failure_tags") or []
+    primary_failure_id = failure_assessment.get("primary_failure_id") or "none"
+    normalized_tags = []
+
+    for raw_failure_tag in raw_failure_tags:
+        if isinstance(raw_failure_tag, str):
+            failure_id = raw_failure_tag
+            failure_default = failure_defaults.get(failure_id, {})
+            normalized_tags.append(
+                {
+                    "failure_id": failure_id,
+                    "label": failure_default.get("label", failure_id),
+                    "category": failure_default.get("category", "unknown"),
+                    "severity": failure_default.get("default_severity", "medium"),
+                    "confidence": 85,
+                    "repair_stage": failure_default.get("preferred_repair_stage", "manual"),
+                    "evidence": [],
+                    "guidance": failure_default.get("description", ""),
+                }
+            )
+            continue
+
+        if not isinstance(raw_failure_tag, dict):
+            continue
+
+        failure_id = (
+            raw_failure_tag.get("failure_id")
+            or raw_failure_tag.get("id")
+            or raw_failure_tag.get("label")
+            or ""
+        )
+        failure_default = failure_defaults.get(failure_id, {})
+        normalized_tags.append(
+            {
+                "failure_id": failure_id,
+                "label": raw_failure_tag.get("label")
+                or failure_default.get("label", failure_id),
+                "category": raw_failure_tag.get("category")
+                or failure_default.get("category", "unknown"),
+                "severity": raw_failure_tag.get("severity")
+                or failure_default.get("default_severity", "medium"),
+                "confidence": raw_failure_tag.get("confidence", 85),
+                "repair_stage": raw_failure_tag.get("repair_stage")
+                or failure_default.get("preferred_repair_stage", "manual"),
+                "evidence": raw_failure_tag.get("evidence") or [],
+                "guidance": raw_failure_tag.get("guidance")
+                or raw_failure_tag.get("note")
+                or failure_default.get("description", ""),
+            }
+        )
+
+    if primary_failure_id == "none" and normalized_tags:
+        primary_failure_id = normalized_tags[0]["failure_id"]
+    if primary_failure_id != "none" and not normalized_tags:
+        failure_default = failure_defaults.get(primary_failure_id, {})
+        normalized_tags.append(
+            {
+                "failure_id": primary_failure_id,
+                "label": failure_default.get("label", primary_failure_id),
+                "category": failure_default.get("category", "unknown"),
+                "severity": failure_default.get("default_severity", "medium"),
+                "confidence": 80,
+                "repair_stage": failure_default.get("preferred_repair_stage", "manual"),
+                "evidence": [],
+                "guidance": failure_assessment.get("note")
+                or failure_default.get("description", ""),
+            }
+        )
+
+    highest_severity = "none"
+    for normalized_tag in normalized_tags:
+        if SEVERITY_ORDER.get(normalized_tag["severity"], 0) > SEVERITY_ORDER[highest_severity]:
+            highest_severity = normalized_tag["severity"]
+
+    if not normalized_tags:
+        primary_failure_id = "none"
+
+    return {
+        "taxonomy_profile": failure_assessment.get("taxonomy_profile")
+        or failure_assessment.get("profile_id")
+        or taxonomy_profile_id,
+        "primary_failure_id": primary_failure_id,
+        "highest_severity": failure_assessment.get("highest_severity") or highest_severity,
+        "failure_tags": normalized_tags,
+    }
+
+
+def normalize_feedback_decision(
+    evaluation_profile: dict[str, Any],
+    evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    feedback_protocol = (evaluation_profile.get("feedback_protocol_profile") or {}).get("content") or {}
+    feedback_decision = copy.deepcopy(evaluation.get("feedback_decision") or {})
+    suggested_status = feedback_decision.get("suggested_status", "")
+    suggested_next_action = feedback_decision.get("suggested_next_action", "")
+    rewrite_priority = evaluation.get("rewrite_priority", "")
+    return {
+        "protocol_id": feedback_decision.get("protocol_id")
+        or feedback_decision.get("profile_id")
+        or feedback_protocol.get("profile_id", ""),
+        "rule_id": feedback_decision.get("rule_id", ""),
+        "suggested_status": suggested_status,
+        "suggested_next_action": suggested_next_action,
+        "preferred_repair_stage": feedback_decision.get("preferred_repair_stage")
+        or feedback_decision.get("suggested_next_stage")
+        or infer_repair_stage(suggested_next_action),
+        "urgency": feedback_decision.get("urgency")
+        or infer_urgency(rewrite_priority, suggested_next_action),
+        "blocking": feedback_decision.get("blocking")
+        if feedback_decision.get("blocking") is not None
+        else suggested_status != "approved",
+        "rationale": feedback_decision.get("rationale")
+        or feedback_decision.get("note")
+        or "",
+    }
+
+
+def normalize_evaluation_payload(
+    evaluation_profile: dict[str, Any],
+    evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = copy.deepcopy(evaluation)
+    normalized["failure_assessment"] = normalize_failure_assessment(
+        evaluation_profile,
+        normalized,
+    )
+    normalized["feedback_decision"] = normalize_feedback_decision(
+        evaluation_profile,
+        normalized,
+    )
+    return normalized
+
+
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -164,6 +383,10 @@ def build_prompt(
             f"  questions:\n{questions}"
         )
     axes_block = "\n".join(axes_lines)
+    failure_taxonomy = (evaluation_profile.get("failure_taxonomy_profile") or {}).get("content") or {}
+    feedback_protocol = (evaluation_profile.get("feedback_protocol_profile") or {}).get("content") or {}
+    failure_taxonomy_block = format_failure_taxonomy_block(failure_taxonomy)
+    feedback_protocol_block = format_feedback_protocol_block(feedback_protocol)
 
     trajectory_text = json.dumps(trajectory_record.get("trajectory"), ensure_ascii=False, indent=2)
     system_prompt = (
@@ -174,16 +397,23 @@ def build_prompt(
         "3. 如判断轴之间存在冲突，必须在 principle_conflicts 中说明取舍质量。\n"
         "4. 评估 agent 不负责重写正文，只负责给出 verdict、证据和修改方向。\n"
         "5. 可以指出 assistant 污染、长期目标缺失、监护推理缺失等问题。\n"
-        "6. axis_results 必须是一个长度为 8 的数组，每个 axis_id 只出现一次，不要改成对象嵌套。\n"
-        "7. 每个 axis_results item 都必须包含：axis_id、axis_name、verdict、score、confidence、evidence_for、evidence_against、guidance。\n"
-        "8. principle_conflicts、assistant_alignment、extension_plugins 都必须位于顶层，不要嵌套到 axis_results 里。\n"
-        "9. extension_plugins 当前可为空数组，但保留该位以支持未来插件式扩展。\n"
-        f"10. 你必须且只能调用一次 submit_trajectory_evaluation 函数，不要输出函数外文本。"
+        "6. failure_assessment.failure_tags 只从给定 failure taxonomy 中选择 0-3 个最关键的 failure_id；没有明显 failure 时返回空数组，并把 primary_failure_id 填 none、highest_severity 填 none。\n"
+        "7. feedback_decision 必须显式选择一个 protocol rule，让 suggested_status、suggested_next_action 与 overall_verdict、failure_assessment 和 principle_conflicts 保持一致。\n"
+        "8. 若主问题只是压缩、state_updates 或 assistant 表面语气，优先 revise_prompt_local；若主问题来自世界模型、关系框架、目标层次、候选动作或 chosen_action 推理，优先 regenerate_from_teacher。\n"
+        "9. axis_results 必须是一个长度为 8 的数组，每个 axis_id 只出现一次，不要改成对象嵌套。\n"
+        "10. 每个 axis_results item 都必须包含：axis_id、axis_name、verdict、score、confidence、evidence_for、evidence_against、guidance。\n"
+        "11. principle_conflicts、assistant_alignment、extension_plugins 都必须位于顶层，不要嵌套到 axis_results 里。\n"
+        "12. extension_plugins 当前可为空数组，但保留该位以支持未来插件式扩展。\n"
+        f"13. 你必须且只能调用一次 submit_trajectory_evaluation 函数，不要输出函数外文本。"
     )
     user_prompt = (
         f"评估 profile: {evaluation_profile['profile_id']}\n\n"
         "工作宪法判断轴：\n"
         f"{axes_block}\n\n"
+        "failure taxonomy：\n"
+        f"{failure_taxonomy_block}\n\n"
+        "feedback protocol：\n"
+        f"{feedback_protocol_block}\n\n"
         f"场景 ID：{scenario['id']}\n"
         f"角色名：{scenario['name']}\n\n"
         f"人物经历与稳定特征：\n{scenario['profile']}\n\n"
@@ -193,6 +423,10 @@ def build_prompt(
         "输出提醒：\n"
         "- overall_verdict 只在 keep / revise / manual_review / reject 中选择。\n"
         "- global_assessment.principal_axis 填当前最主导的判断轴。\n"
+        f"- failure_assessment.taxonomy_profile 固定填 {(failure_taxonomy or {}).get('profile_id', '')}。\n"
+        f"- feedback_decision.protocol_id 固定填 {(feedback_protocol or {}).get('profile_id', '')}。\n"
+        "- feedback_decision.rule_id 只从给定 feedback protocol 的规则里选择。\n"
+        "- failure_assessment.failure_tags 最多 3 个，优先选择真正主导后续动作的 failure。\n"
         "- axis_results 必须覆盖 8 个 axis_id：ren、yi、li、zhi、xin、yong_jie、self_cultivation、law_guardianship。\n"
         "- assistant_alignment 只写从这条轨迹中看得到的信号。\n"
         "- summary.trace_tags 使用短标签，例如 long_horizon_present、guardian_missing、assistant_tone 等。\n"
@@ -269,6 +503,10 @@ def write_manifest(
         "evaluation_schema_path": str(config.evaluation_schema_path.relative_to(config.root_dir)),
         "evaluation_profile": evaluation_profile["profile_id"],
         "evaluation_profile_path": str(config.evaluation_profile_path.relative_to(config.root_dir)),
+        "failure_taxonomy_profile": ((evaluation_profile.get("failure_taxonomy_profile") or {}).get("content") or {}).get("profile_id", ""),
+        "failure_taxonomy_profile_path": (evaluation_profile.get("failure_taxonomy_profile") or {}).get("path", ""),
+        "feedback_protocol_profile": ((evaluation_profile.get("feedback_protocol_profile") or {}).get("content") or {}).get("profile_id", ""),
+        "feedback_protocol_profile_path": (evaluation_profile.get("feedback_protocol_profile") or {}).get("path", ""),
         "output_files": {
             "requests": str(config.request_dir.relative_to(config.root_dir)),
             "raw": str(config.raw_dir.relative_to(config.root_dir)),
@@ -281,6 +519,7 @@ def write_manifest(
 
 def parse_evaluation_record(
     evaluation_schema: dict[str, Any],
+    evaluation_profile: dict[str, Any],
     trajectory_record: dict[str, Any],
     data: dict[str, Any],
 ) -> dict[str, Any]:
@@ -295,8 +534,16 @@ def parse_evaluation_record(
         "parse_status": "ok",
         "overall_verdict": "",
         "rewrite_priority": "",
+        "feedback_rule_id": "",
+        "feedback_suggested_status": "",
+        "feedback_next_action": "",
+        "primary_failure_id": "",
+        "highest_failure_severity": "",
+        "failure_ids": [],
         "axis_scores": {},
         "assistant_contamination_detected": None,
+        "failure_assessment": None,
+        "feedback_decision": None,
         "evaluation": None,
         "raw_content": message.get("content", ""),
     }
@@ -312,6 +559,8 @@ def parse_evaluation_record(
         record["raw_arguments"] = arguments_text
         return record
 
+    evaluation = normalize_evaluation_payload(evaluation_profile, evaluation)
+
     axis_scores = {}
     for axis_value in evaluation.get("axis_results") or []:
         axis_id = axis_value.get("axis_id", "")
@@ -319,14 +568,32 @@ def parse_evaluation_record(
             axis_scores[axis_id] = axis_value.get("score")
 
     assistant_alignment = evaluation.get("assistant_alignment") or {}
+    failure_assessment = evaluation.get("failure_assessment") or {}
+    feedback_decision = evaluation.get("feedback_decision") or {}
+    failure_ids = []
+    for failure_tag in failure_assessment.get("failure_tags") or []:
+        if not isinstance(failure_tag, dict):
+            continue
+        failure_id = failure_tag.get("failure_id", "")
+        if failure_id:
+            failure_ids.append(failure_id)
+
     record.update(
         {
             "overall_verdict": evaluation.get("overall_verdict", ""),
             "rewrite_priority": evaluation.get("rewrite_priority", ""),
+            "feedback_rule_id": feedback_decision.get("rule_id", ""),
+            "feedback_suggested_status": feedback_decision.get("suggested_status", ""),
+            "feedback_next_action": feedback_decision.get("suggested_next_action", ""),
+            "primary_failure_id": failure_assessment.get("primary_failure_id", ""),
+            "highest_failure_severity": failure_assessment.get("highest_severity", ""),
+            "failure_ids": failure_ids,
             "axis_scores": axis_scores,
             "assistant_contamination_detected": assistant_alignment.get(
                 "assistant_contamination_detected"
             ),
+            "failure_assessment": failure_assessment,
+            "feedback_decision": feedback_decision,
             "evaluation": evaluation,
         }
     )
@@ -343,12 +610,19 @@ def write_summary(evaluations_file: Path, summary_file: Path) -> str:
 
     verdict_counts: collections.Counter[str] = collections.Counter()
     rewrite_counts: collections.Counter[str] = collections.Counter()
+    feedback_action_counts: collections.Counter[str] = collections.Counter()
+    primary_failure_counts: collections.Counter[str] = collections.Counter()
+    failure_tag_counts: collections.Counter[str] = collections.Counter()
     axis_score_map: dict[str, list[int]] = collections.defaultdict(list)
     contamination_true = 0
 
     for row in rows:
         verdict_counts[row.get("overall_verdict") or "<empty>"] += 1
         rewrite_counts[row.get("rewrite_priority") or "<empty>"] += 1
+        feedback_action_counts[row.get("feedback_next_action") or "<empty>"] += 1
+        primary_failure_counts[row.get("primary_failure_id") or "<empty>"] += 1
+        for failure_id in row.get("failure_ids") or []:
+            failure_tag_counts[failure_id] += 1
         if row.get("assistant_contamination_detected") is True:
             contamination_true += 1
         for axis_id, score in (row.get("axis_scores") or {}).items():
@@ -357,6 +631,9 @@ def write_summary(evaluations_file: Path, summary_file: Path) -> str:
 
     lines.append(f"overall_verdict={dict(sorted(verdict_counts.items()))}")
     lines.append(f"rewrite_priority={dict(sorted(rewrite_counts.items()))}")
+    lines.append(f"feedback_next_action={dict(sorted(feedback_action_counts.items()))}")
+    lines.append(f"primary_failure={dict(sorted(primary_failure_counts.items()))}")
+    lines.append(f"failure_tags={dict(sorted(failure_tag_counts.items()))}")
     lines.append(f"assistant_contamination_detected={contamination_true}/{len(rows) or 1}")
     lines.append("")
     lines.append("axis_average_scores:")
@@ -424,7 +701,12 @@ def run_evaluation(
             response = post_chat_completion(config, payload)
             write_json(raw_path, response)
 
-            record = parse_evaluation_record(evaluation_schema, trajectory_record, response)
+            record = parse_evaluation_record(
+                evaluation_schema,
+                evaluation_profile,
+                trajectory_record,
+                response,
+            )
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
             handle.flush()
 
@@ -439,7 +721,10 @@ def main() -> None:
     config = load_config()
     validate_config(config, trajectory_file)
     evaluation_schema = load_json(config.evaluation_schema_path)
-    evaluation_profile = load_json(config.evaluation_profile_path)
+    evaluation_profile = hydrate_evaluation_profile(
+        config.root_dir,
+        load_json(config.evaluation_profile_path),
+    )
     trajectory_rows = load_jsonl(trajectory_file)
     run_evaluation(
         config,

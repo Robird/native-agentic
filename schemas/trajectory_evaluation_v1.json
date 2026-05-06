@@ -89,6 +89,12 @@
           "trace_tags"
         ]
       },
+      "failure_assessment": {
+        "$ref": "#/definitions/failureAssessment"
+      },
+      "feedback_decision": {
+        "$ref": "#/definitions/feedbackDecision"
+      },
       "axis_results": {
         "type": "array",
         "minItems": 8,
@@ -195,6 +201,8 @@
       "rewrite_priority",
       "global_assessment",
       "summary",
+      "failure_assessment",
+      "feedback_decision",
       "axis_results",
       "principle_conflicts",
       "assistant_alignment",
@@ -202,6 +210,166 @@
     ]
   },
   "definitions": {
+    "failureTag": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "failure_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "repair_stage": {
+          "type": "string",
+          "enum": [
+            "trajectory_prompt",
+            "teacher_stage",
+            "manual",
+            "dataset_policy",
+            "generation_rerun"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "guidance": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "failure_id",
+        "label",
+        "category",
+        "severity",
+        "confidence",
+        "repair_stage",
+        "evidence",
+        "guidance"
+      ]
+    },
+    "failureAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "taxonomy_profile": {
+          "type": "string"
+        },
+        "primary_failure_id": {
+          "type": "string"
+        },
+        "highest_severity": {
+          "type": "string",
+          "enum": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "failure_tags": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/definitions/failureTag"
+          }
+        }
+      },
+      "required": [
+        "taxonomy_profile",
+        "primary_failure_id",
+        "highest_severity",
+        "failure_tags"
+      ]
+    },
+    "feedbackDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_id": {
+          "type": "string"
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "suggested_status": {
+          "type": "string",
+          "enum": [
+            "approved",
+            "needs_revision",
+            "manual_review",
+            "rejected"
+          ]
+        },
+        "suggested_next_action": {
+          "type": "string",
+          "enum": [
+            "approve",
+            "revise_prompt_local",
+            "regenerate_from_teacher",
+            "manual_review",
+            "reject",
+            "rerun_generation"
+          ]
+        },
+        "preferred_repair_stage": {
+          "type": "string",
+          "enum": [
+            "none",
+            "trajectory_prompt",
+            "teacher_stage",
+            "manual",
+            "dataset_policy",
+            "generation_rerun"
+          ]
+        },
+        "urgency": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "rationale": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_id",
+        "rule_id",
+        "suggested_status",
+        "suggested_next_action",
+        "preferred_repair_stage",
+        "urgency",
+        "blocking",
+        "rationale"
+      ]
+    },
     "axisEvaluation": {
       "type": "object",
       "additionalProperties": false,

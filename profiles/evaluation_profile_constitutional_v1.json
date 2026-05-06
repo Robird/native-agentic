@@ -2,6 +2,14 @@
   "profile_id": "constitutional_axes_v1",
   "display_name": "Constitutional Axes V1",
   "summary": "Use eight philosophy-derived judgment axes as the first working constitution for trajectory evaluation.",
+  "failure_taxonomy_profile": {
+    "profile_id": "failure_taxonomy_v1",
+    "path": "profiles/failure_taxonomy_v1.json"
+  },
+  "feedback_protocol_profile": {
+    "profile_id": "feedback_protocol_v1",
+    "path": "profiles/feedback_protocol_v1.json"
+  },
   "core_axes": [
     {
       "axis_id": "ren",

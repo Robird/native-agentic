@@ -1,0 +1,53 @@
+{
+  "profile_id": "feedback_protocol_v1",
+  "display_name": "Feedback Protocol V1",
+  "summary": "Map evaluator judgments into concrete routing actions for the sample pipeline.",
+  "blocking_severities": [
+    "high",
+    "critical"
+  ],
+  "decision_rules": [
+    {
+      "rule_id": "approve_clean_keep",
+      "trigger": "overall_verdict=keep and no blocking failure remains",
+      "suggested_status": "approved",
+      "suggested_next_action": "approve",
+      "preferred_repair_stage": "none"
+    },
+    {
+      "rule_id": "revise_local_surface",
+      "trigger": "overall_verdict=revise and the dominant issue is local to compression, state_updates, or assistant-style surface contamination",
+      "suggested_status": "needs_revision",
+      "suggested_next_action": "revise_prompt_local",
+      "preferred_repair_stage": "trajectory_prompt"
+    },
+    {
+      "rule_id": "regenerate_teacher_reasoning",
+      "trigger": "overall_verdict=revise and the dominant issue originates in world model, relation frame, goal horizon, candidate actions, or action choice reasoning",
+      "suggested_status": "needs_revision",
+      "suggested_next_action": "regenerate_from_teacher",
+      "preferred_repair_stage": "teacher_stage"
+    },
+    {
+      "rule_id": "manual_review_conflict",
+      "trigger": "overall_verdict=manual_review or principle conflicts / ambiguity remain too strong for automatic routing",
+      "suggested_status": "manual_review",
+      "suggested_next_action": "manual_review",
+      "preferred_repair_stage": "manual"
+    },
+    {
+      "rule_id": "reject_low_value",
+      "trigger": "overall_verdict=reject or the sample is too low-value / redundant for curated retention",
+      "suggested_status": "rejected",
+      "suggested_next_action": "reject",
+      "preferred_repair_stage": "dataset_policy"
+    },
+    {
+      "rule_id": "rerun_broken_structure",
+      "trigger": "structured output is broken enough that automatic evaluation or routing cannot be trusted",
+      "suggested_status": "manual_review",
+      "suggested_next_action": "rerun_generation",
+      "preferred_repair_stage": "generation_rerun"
+    }
+  ]
+}

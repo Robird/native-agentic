@@ -54,6 +54,10 @@ class Config:
     summary_file: Path
     manifest_file: Path
     api_key: str
+    repair_instruction_path: Path | None
+    repair_instruction: dict[str, Any] | None
+    reuse_teacher_analysis_path: Path | None
+    reuse_teacher_record: dict[str, Any] | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,6 +93,20 @@ def load_config() -> Config:
         "RUN_ID",
         datetime.now(timezone.utc).strftime("trajectory-%Y%m%dT%H%M%SZ"),
     )
+    repair_instruction_path_text = os.environ.get("REPAIR_INSTRUCTION_FILE", "").strip()
+    repair_instruction_path = None
+    repair_instruction = None
+    if repair_instruction_path_text:
+        repair_instruction_path = Path(repair_instruction_path_text).expanduser().resolve()
+        repair_instruction = json.loads(repair_instruction_path.read_text(encoding="utf-8"))
+
+    reuse_teacher_analysis_path_text = os.environ.get("REUSE_TEACHER_ANALYSIS_FILE", "").strip()
+    reuse_teacher_analysis_path = None
+    reuse_teacher_record = None
+    if reuse_teacher_analysis_path_text:
+        reuse_teacher_analysis_path = Path(reuse_teacher_analysis_path_text).expanduser().resolve()
+        reuse_teacher_record = load_reuse_teacher_record(reuse_teacher_analysis_path)
+
     run_dir = results_dir / run_id
     model_profile, model_id = resolve_model_settings()
     return Config(
@@ -115,6 +133,10 @@ def load_config() -> Config:
         summary_file=run_dir / "trajectory_summary.txt",
         manifest_file=run_dir / "manifest.json",
         api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        repair_instruction_path=repair_instruction_path,
+        repair_instruction=repair_instruction,
+        reuse_teacher_analysis_path=reuse_teacher_analysis_path,
+        reuse_teacher_record=reuse_teacher_record,
     )
 
 
@@ -129,6 +151,15 @@ def validate_config(config: Config) -> None:
         raise SystemExit("TRAJECTORY_PIPELINE must be one of: single_stage, teacher_compress")
     if config.pipeline_mode == "teacher_compress" and not config.teacher_schema_path.is_file():
         raise SystemExit(f"Teacher schema file not found: {config.teacher_schema_path}")
+    if config.repair_instruction_path is not None and not config.repair_instruction_path.is_file():
+        raise SystemExit(f"Repair instruction file not found: {config.repair_instruction_path}")
+    if config.reuse_teacher_analysis_path is not None:
+        if config.pipeline_mode != "teacher_compress":
+            raise SystemExit("REUSE_TEACHER_ANALYSIS_FILE requires TRAJECTORY_PIPELINE=teacher_compress")
+        if config.samples != 1:
+            raise SystemExit("REUSE_TEACHER_ANALYSIS_FILE currently requires SAMPLES=1")
+        if not config.reuse_teacher_analysis_path.is_file():
+            raise SystemExit(f"Reuse teacher analysis file not found: {config.reuse_teacher_analysis_path}")
 
 
 def discover_scenarios(config: Config, selected_ids: list[str]) -> list[dict[str, Any]]:
@@ -169,6 +200,51 @@ def action_option_lines(scenario: dict[str, Any]) -> tuple[list[str], str]:
     return [item["key"] for item in options] + ["other"], "\n".join(option_lines)
 
 
+def build_repair_instruction_block(config: Config, stage: str) -> str:
+    repair_instruction = config.repair_instruction or {}
+    if not repair_instruction or repair_instruction.get("repair_target") != stage:
+        return ""
+
+    trigger = repair_instruction.get("trigger") or {}
+    preserve = repair_instruction.get("preserve") or {}
+    lines = [
+        "修复任务（这是定向重跑，不是从零自由发挥）：",
+        f"- next_action: {repair_instruction.get('next_action', '')}",
+        f"- repair_target: {repair_instruction.get('repair_target', '')}",
+        f"- primary_failure: {trigger.get('primary_failure_id', '')}",
+    ]
+
+    failure_ids = trigger.get("failure_ids") or []
+    if failure_ids:
+        lines.append(f"- failure_ids: {', '.join(failure_ids)}")
+
+    for focus in repair_instruction.get("repair_focus") or []:
+        lines.append(f"- 优先修复: {focus}")
+
+    chosen_action_label = preserve.get("chosen_action_label")
+    if chosen_action_label and stage == "trajectory_prompt":
+        lines.append(
+            f"- 这是局部修复。若不与 failure 根因冲突，尽量保持 chosen_action.action_label={chosen_action_label}。"
+        )
+
+    for item in preserve.get("must_keep") or []:
+        lines.append(f"- 尽量保留: {item}")
+
+    for strength in preserve.get("strengths") or []:
+        lines.append(f"- 已有优点不要打掉: {strength}")
+
+    if stage == "teacher_stage":
+        lines.append("- 这是教师阶段重推。必要时可以重新推导 action_assessment 和 recommended_packet，但要优先修根因。")
+    else:
+        lines.append("- 这是压缩/轨迹层局部修复。除非 failure 明确涉及动作选择或世界模型错误，不要无故重写关系框架、长期目标和主动作方向。")
+
+    rationale = repair_instruction.get("rationale", "")
+    if rationale:
+        lines.append(f"- repair rationale: {rationale}")
+
+    return "\n".join(lines)
+
+
 def build_single_stage_prompt(
     config: Config,
     schema_template: dict[str, Any],
@@ -176,6 +252,7 @@ def build_single_stage_prompt(
 ) -> tuple[str, str, list[str]]:
     action_labels, option_lines = action_option_lines(scenario)
     tool_name = schema_template["tool_name"]
+    repair_block = build_repair_instruction_block(config, "trajectory_prompt")
     system_prompt = (
         "你是状态轨迹语料生成器。你的输出将被用于训练一种持续存在与运行的 Native Agentic LLM。"
         "你不是助手，不是在回复用户，也不是在写故事成品，而是在产出一条可继续续写的单步状态轨迹。"
@@ -213,6 +290,8 @@ def build_single_stage_prompt(
         "- chosen_action.packet_type 只描述下一步外显包的类型，例如 act、speak、inspect、wait。\n"
         "- chosen_action.packet_content 用一句话写出真正会被执行的动作包内容。\n"
     )
+    if repair_block:
+        user_prompt += f"\n修复上下文：\n{repair_block}\n"
     return system_prompt, user_prompt, action_labels
 
 
@@ -273,6 +352,7 @@ def build_teacher_prompt(
 ) -> tuple[str, str, list[str]]:
     action_labels, option_lines = action_option_lines(scenario)
     tool_name = teacher_schema_template["tool_name"]
+    repair_block = build_repair_instruction_block(config, "teacher_stage")
     system_prompt = (
         "你是分析教师，不是聊天助手。你的任务是先产出一份较充分但仍聚焦的角色分析中间稿，"
         "供第二阶段压缩器进一步压成更短、更稀疏的训练样本。\n\n"
@@ -300,6 +380,8 @@ def build_teacher_prompt(
         "- recommended_packet 应给出你最看好的动作包。\n"
         "- compression_guidance.target_style 应指向‘短、稀疏、可续写、低 assistant 污染’。\n"
     )
+    if repair_block:
+        user_prompt += f"\n修复上下文：\n{repair_block}\n"
     return system_prompt, user_prompt, action_labels
 
 
@@ -334,6 +416,7 @@ def build_compressor_prompt(
     action_labels, option_lines = action_option_lines(scenario)
     tool_name = schema_template["tool_name"]
     teacher_analysis_text = json.dumps(teacher_analysis, ensure_ascii=False, indent=2)
+    repair_block = build_repair_instruction_block(config, "trajectory_prompt")
     system_prompt = (
         "你是状态轨迹压缩器。你的输入是一份分析教师中间稿，你的任务是把它压成更短、更稀疏、更适合未来训练的单步状态轨迹。\n\n"
         "压缩原则：\n"
@@ -360,6 +443,8 @@ def build_compressor_prompt(
         "- relationship_frame 至少保留 1-2 个真正影响此步的关键关系。\n"
         "- quality_control.notes 用一句短说明解释压缩后的关键取舍。\n"
     )
+    if repair_block:
+        user_prompt += f"\n修复上下文：\n{repair_block}\n"
     return system_prompt, user_prompt, action_labels
 
 
@@ -416,7 +501,42 @@ def repair_common_tool_json(arguments_text: str) -> str:
         ', "inferred_latents"',
         repaired,
     )
+    repaired = append_missing_json_closers(repaired)
     return repaired
+
+
+def append_missing_json_closers(arguments_text: str) -> str:
+    stack: list[str] = []
+    in_string = False
+    is_escaped = False
+
+    for char in arguments_text:
+        if in_string:
+            if is_escaped:
+                is_escaped = False
+            elif char == "\\":
+                is_escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char in "[{":
+            stack.append(char)
+            continue
+        if char == "}" and stack and stack[-1] == "{":
+            stack.pop()
+            continue
+        if char == "]" and stack and stack[-1] == "[":
+            stack.pop()
+
+    closers: list[str] = []
+    while stack:
+        opener = stack.pop()
+        closers.append("}" if opener == "{" else "]")
+    return arguments_text + "".join(closers)
 
 
 def load_tool_arguments(arguments_text: str) -> dict[str, Any]:
@@ -434,6 +554,85 @@ def normalize_world_model_consistency(payload: dict[str, Any]) -> None:
     consistency = quality_control.get("world_model_consistency")
     if isinstance(consistency, str) and consistency.isdigit():
         quality_control["world_model_consistency"] = int(consistency)
+
+
+def normalize_teacher_analysis_shape(teacher_analysis: dict[str, Any]) -> None:
+    recommended_packet = teacher_analysis.get("recommended_packet") or {}
+    if (
+        "compression_guidance" not in teacher_analysis
+        and isinstance(recommended_packet.get("compression_guidance"), dict)
+    ):
+        teacher_analysis["compression_guidance"] = recommended_packet.pop("compression_guidance")
+
+    compression_guidance = teacher_analysis.get("compression_guidance") or {}
+    if "quality_control" not in teacher_analysis:
+        nested_quality_control = None
+        if isinstance(compression_guidance.get("quality_control"), dict):
+            nested_quality_control = compression_guidance.pop("quality_control")
+        elif isinstance(recommended_packet.get("quality_control"), dict):
+            nested_quality_control = recommended_packet.pop("quality_control")
+        if nested_quality_control is not None:
+            teacher_analysis["quality_control"] = nested_quality_control
+
+
+def load_reuse_teacher_record(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if "teacher_analysis" in payload:
+        teacher_record = copy.deepcopy(payload)
+    else:
+        teacher_record = {
+            "scenario_id": payload.get("scenario_id", ""),
+            "profile": payload.get("profile", ""),
+            "sample_index": payload.get("sample_index", 1),
+            "schema_version": payload.get("schema_version", "teacher_analysis_v1"),
+            "model": payload.get("model", "reused_teacher_analysis"),
+            "finish_reason": payload.get("finish_reason", "reused_teacher_analysis"),
+            "parse_status": payload.get("parse_status", "ok"),
+            "recommended_action_label": payload.get("recommended_action_label", ""),
+            "assistant_contamination_risk": payload.get("assistant_contamination_risk", ""),
+            "over_explaining_risk": payload.get("over_explaining_risk", ""),
+            "world_model_consistency": payload.get("world_model_consistency"),
+            "teacher_analysis": payload,
+            "raw_content": payload.get("raw_content", ""),
+        }
+
+    teacher_analysis = teacher_record.get("teacher_analysis") or {}
+    normalize_teacher_analysis_shape(teacher_analysis)
+    normalize_world_model_consistency(teacher_analysis)
+    teacher_record["teacher_analysis"] = teacher_analysis
+    teacher_record["recommended_action_label"] = teacher_record.get("recommended_action_label") or (
+        teacher_analysis.get("recommended_packet") or {}
+    ).get("action_label", "")
+    quality_control = teacher_analysis.get("quality_control") or {}
+    teacher_record["assistant_contamination_risk"] = teacher_record.get(
+        "assistant_contamination_risk",
+        "",
+    ) or quality_control.get("assistant_contamination_risk", "")
+    teacher_record["over_explaining_risk"] = teacher_record.get(
+        "over_explaining_risk",
+        "",
+    ) or quality_control.get("over_explaining_risk", "")
+    teacher_record["world_model_consistency"] = teacher_record.get(
+        "world_model_consistency"
+    ) or quality_control.get("world_model_consistency")
+    teacher_record["parse_status"] = teacher_record.get("parse_status", "ok")
+    return teacher_record
+
+
+def materialize_reused_teacher_record(
+    template_record: dict[str, Any],
+    scenario_id: str,
+    profile: str,
+    sample_index: int,
+) -> dict[str, Any]:
+    teacher_record = copy.deepcopy(template_record)
+    teacher_record["scenario_id"] = scenario_id
+    teacher_record["profile"] = profile
+    teacher_record["sample_index"] = sample_index
+    teacher_record["parse_status"] = teacher_record.get("parse_status", "ok")
+    teacher_record["finish_reason"] = teacher_record.get("finish_reason", "reused_teacher_analysis")
+    teacher_record["model"] = teacher_record.get("model", "reused_teacher_analysis")
+    return teacher_record
 
 
 def parse_trajectory_record(
@@ -536,6 +735,7 @@ def parse_teacher_analysis_record(
         record["raw_arguments"] = arguments_text
         return record
 
+    normalize_teacher_analysis_shape(teacher_analysis)
     normalize_world_model_consistency(teacher_analysis)
     quality_control = teacher_analysis.get("quality_control", {})
     recommended_packet = teacher_analysis.get("recommended_packet", {})
@@ -587,6 +787,9 @@ def write_manifest(
         "pipeline_mode": config.pipeline_mode,
         "schema_version": schema_template["schema_version"],
         "schema_path": str(config.schema_path.relative_to(config.root_dir)),
+        "repair_instruction_ref": str(config.repair_instruction_path) if config.repair_instruction_path else None,
+        "repair_target": (config.repair_instruction or {}).get("repair_target") if config.repair_instruction else None,
+        "reuse_teacher_analysis_ref": str(config.reuse_teacher_analysis_path) if config.reuse_teacher_analysis_path else None,
         "scenarios": [scenario["id"] for scenario in scenarios],
         "output_files": {
             "requests": str(config.request_dir.relative_to(config.root_dir)),
@@ -737,23 +940,32 @@ def run_generation(
 
                     teacher_request_path = config.teacher_request_dir / f"{scenario_id}__{tag}.json"
                     teacher_raw_path = config.teacher_raw_dir / f"{scenario_id}__{tag}.json"
-                    teacher_payload = build_teacher_request_payload(
-                        config,
-                        teacher_schema_template,
-                        scenario,
-                    )
-                    write_json(teacher_request_path, teacher_payload)
+                    if config.reuse_teacher_record is not None:
+                        print(f"reusing_teacher_analysis scenario={scenario_id} sample={tag}")
+                        teacher_record = materialize_reused_teacher_record(
+                            config.reuse_teacher_record,
+                            scenario_id,
+                            config.profile,
+                            index,
+                        )
+                    else:
+                        teacher_payload = build_teacher_request_payload(
+                            config,
+                            teacher_schema_template,
+                            scenario,
+                        )
+                        write_json(teacher_request_path, teacher_payload)
 
-                    print(f"teacher_request scenario={scenario_id} sample={tag}")
-                    teacher_response = post_chat_completion(config, teacher_payload)
-                    write_json(teacher_raw_path, teacher_response)
-                    teacher_record = parse_teacher_analysis_record(
-                        teacher_schema_template,
-                        scenario_id,
-                        config.profile,
-                        index,
-                        teacher_response,
-                    )
+                        print(f"teacher_request scenario={scenario_id} sample={tag}")
+                        teacher_response = post_chat_completion(config, teacher_payload)
+                        write_json(teacher_raw_path, teacher_response)
+                        teacher_record = parse_teacher_analysis_record(
+                            teacher_schema_template,
+                            scenario_id,
+                            config.profile,
+                            index,
+                            teacher_response,
+                        )
                     teacher_handle.write(json.dumps(teacher_record, ensure_ascii=False) + "\n")
                     teacher_handle.flush()
 
@@ -764,8 +976,8 @@ def run_generation(
                             "pipeline_mode": config.pipeline_mode,
                             "sample_index": index,
                             "schema_version": schema_template["schema_version"],
-                            "model": teacher_response.get("model", ""),
-                            "finish_reason": teacher_response.get("choices", [{}])[0].get("finish_reason", ""),
+                            "model": teacher_record.get("model", ""),
+                            "finish_reason": teacher_record.get("finish_reason", ""),
                             "parse_status": f"teacher_{teacher_record['parse_status']}",
                             "teacher_parse_status": teacher_record["parse_status"],
                             "teacher_recommended_action_label": teacher_record.get("recommended_action_label", ""),
